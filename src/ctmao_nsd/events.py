@@ -16,6 +16,7 @@ class EventKind(str, Enum):
     TASK_COMPLETED = "task_completed"
     TASK_FAILED = "task_failed"
     MEMORY_SYNCED = "memory_synced"
+    WORKER_FAILED = "worker_failed"
     WORKER_STOPPED = "worker_stopped"
 
 

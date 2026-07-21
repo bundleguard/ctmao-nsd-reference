@@ -1,53 +1,61 @@
 # CTMAO-NSD v0.1 Hardening Status
 
-The v0.1 implementation passes its standard-library unit suite and both
-two-thread examples. It is suitable as an alpha reference and teaching
-implementation under a single-flight usage contract. It is not yet a hardened
-production runtime.
+The v0.1 implementation is an alpha reference and teaching runtime. Its core
+concurrency safety controls are implemented and covered by the standard-library
+test suite.
 
-## Supported Usage Contract
+## Resolved Controls
 
-- Use one `Orchestrator.run()` call at a time per orchestrator instance.
-- Await the active run before calling `close()`.
-- Treat worker runtime failure as terminal for that worker instance.
-- Install the package or place `src` on the import path before running examples.
+### Single Correlation Dispatcher
 
-## Verified Hardening Blockers
+One orchestrator-owned dispatcher is the sole consumer of worker envelopes.
+Commands are registered before submission, results are routed by correlation
+ID, stale envelopes are ignored, and worker failures resolve all pending work
+owned by that worker.
 
-### Central Result Dispatch
+### Explicit Single-Flight Contract
 
-Concurrent `run()` calls currently consume the same outbound queue. Each call
-can receive and discard an envelope correlated with the other call, causing
-both operations to time out. A single orchestrator-owned dispatcher must route
-envelopes to per-correlation futures before concurrent callers are supported.
+One `Orchestrator.run()` call is allowed at a time. An overlapping call raises
+`OrchestratorBusyError` immediately without disturbing the active run. If a
+caller cancels a run, the orchestrator rejects reuse until the late worker result
+has drained through the dispatcher.
+
+### Absolute Execution Deadline
+
+Each run creates one monotonic deadline before command submission. The same
+deadline is carried into every worker delegation tree and result collection uses
+that fixed boundary plus a small transport grace period. Unrelated envelopes
+cannot extend execution indefinitely.
 
 ### Active-Task Shutdown
 
-Worker joining is synchronous and currently allows less time than a legitimate
-default task deadline. Calling `close()` during active work can raise
-`TimeoutError`, block the caller's event loop during joins, and leave a
-non-daemon worker alive until the task finishes. A drain/cancel/stop lifecycle
-with asynchronous bounded joining is required.
+`Orchestrator.close()` rejects new work, requests cancellation of every worker
+root coroutine, joins workers concurrently outside the caller event loop, and
+stops the dispatcher after lifecycle envelopes have been processed. An
+interrupted run raises `OrchestrationCancelledError`.
 
 ### Worker Failure Attribution
 
-The outer worker crash boundary can emit a fabricated correlation ID rather
-than the active command's ID. Failure attribution is therefore only reliable
-under the single-in-flight contract. Dead workers also require an explicit
-terminal lifecycle state so later submissions fail immediately.
+Workers retain the active command correlation at the fatal boundary. Failed and
+stopped workers reject later commands with `WorkerUnavailableError`; lifecycle
+events come from actual worker envelopes rather than optimistic shutdown claims.
 
-### Orchestration Deadline
+## Supported Usage Contract
 
-The orchestrator currently applies a fresh collection timeout to every envelope
-read. A future implementation should calculate one absolute orchestration
-deadline so unrelated or stale envelopes cannot extend the run indefinitely.
+- Use one public `run()` call at a time per orchestrator instance.
+- Treat an infrastructure-level worker failure as terminal for that worker.
+- Expect `close()` to cancel active asynchronous task trees.
+- Keep task implementations cancellation-cooperative and avoid blocking the
+  worker event loop with unbounded synchronous work.
+- Install the package or place `src` on the import path before running examples.
 
-## Highest-Value Next Engineering Task
+## Remaining Alpha Limitations
 
-Implement a central result dispatcher with an explicit single-flight guard as
-the safe intermediate step. The guard should reject overlapping runs clearly;
-the dispatcher can then evolve toward supported concurrent calls without
-changing the worker message protocol.
+- Concurrent public runs are rejected rather than queued or multiplexed.
+- Worker restart and assignment replay are not implemented.
+- Transport and synchronized memory are in-process and non-durable.
+- Cancellation cannot forcibly interrupt a blocking native or synchronous call.
+- The reference task executor is declarative; product adapters and arbitrary
+  handler registration are future extension points.
 
-After that change, implement the drain/cancel/stop shutdown state machine and
-add deterministic regression tests for both verified failure cases.
+These are explicit scope limits, not untracked correctness failures.

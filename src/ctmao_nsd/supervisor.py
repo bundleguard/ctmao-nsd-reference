@@ -20,9 +20,13 @@ class SupervisorAgent:
         self._memory = memory
         self._config = config
 
-    async def execute(self, task: TaskSpec) -> TaskResult:
+    async def execute(
+        self, task: TaskSpec, deadline: float | None = None
+    ) -> TaskResult:
         """Delegate root children and aggregate outcomes in declaration order."""
-        context = DelegationContext.root(task.task_id, self._worker_id, self._config)
+        context = DelegationContext.root(
+            task.task_id, self._worker_id, self._config, deadline
+        )
         self._memory.set("root_task", task.name)
         try:
             context.validate_child_count(len(task.children))

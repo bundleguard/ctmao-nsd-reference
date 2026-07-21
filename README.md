@@ -13,8 +13,9 @@ AutoGen, Swarm, Semantic Kernel, or another orchestration SDK.
 
 ## Relationship to the AI Product Framework
 
-This repository is the standalone execution-engine reference. The sibling **AI
-Product Framework** governs discovery, architecture selection, approval gates,
+This repository is the standalone execution-engine reference. The
+[AI Product Framework](https://github.com/bundleguard/ai-product-framework)
+governs discovery, architecture selection, approval gates,
 implementation, verification, deployment, and retrospectives. It may select
 CTMAO-NSD when a product genuinely needs isolated concurrent agent runtimes, but
 the two repositories remain independent:
@@ -185,9 +186,9 @@ blocking call; extensions must preserve and supplement the safety model.
   aggregate to report failure while retaining partial child results.
 - One worker's task failure does not cancel work assigned to another worker.
 - A fatal worker-runtime error is reported through a `WORKER_FAILED` envelope.
-- Shutdown is cooperative. Completed or idle workers are joined before
-  `Orchestrator.close()` returns; closing during a longer active assignment is a
-  known v0.1 hardening gap.
+- Shutdown is cooperative and bounded. `Orchestrator.close()` cancels active
+  worker root coroutines, keeps the caller event loop responsive, and joins all
+  worker threads before returning.
 
 Automatic worker restart, durable replay, retry policy, and process-level crash
 recovery are intentionally future concerns.
@@ -268,11 +269,12 @@ python -m unittest discover -s tests -v
   ownership and deadline rules.
 - The interval constants are extension points in v0.1.0, not background polling
   loops required for correctness.
-- `Orchestrator.run()` is currently single-flight. Applications must not call it
-  concurrently on the same orchestrator instance until a central envelope
-  dispatcher is implemented.
-- Active-task shutdown can exceed the current worker join allowance. Complete a
-  run before closing the orchestrator in v0.1.
+- `Orchestrator.run()` is intentionally single-flight. A second overlapping call
+  raises `OrchestratorBusyError`; all worker envelopes still pass through one
+  central correlation dispatcher.
+- Calling `close()` during a run cancels that run with
+  `OrchestrationCancelledError`. Cancellation is cooperative at awaited Python
+  boundaries; blocking native or synchronous calls require their own policy.
 
 See [Hardening status](docs/hardening.md) for verified alpha limitations.
 
@@ -280,7 +282,7 @@ See [Hardening status](docs/hardening.md) for verified alpha limitations.
 
 - Durable message transport and restartable assignments
 - Pluggable task executors and supervisor routing policies
-- Heartbeats, health states, drain/cancel shutdown phases, and worker restart
+- Heartbeats, explicit health states, drain policies, and worker restart
 - Compare-and-swap context import into subsequent assignments
 - Process or remote-worker transports using the same immutable envelopes
 - Metrics, tracing adapters, persistence, authentication, and governance hooks

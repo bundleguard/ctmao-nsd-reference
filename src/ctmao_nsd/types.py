@@ -99,6 +99,7 @@ class WorkerCommand:
     correlation_id: UUID = field(default_factory=uuid4)
     task: TaskSpec | None = None
     sync_token: SyncToken | None = None
+    deadline: float | None = None
 
 
 @dataclass(frozen=True, slots=True)

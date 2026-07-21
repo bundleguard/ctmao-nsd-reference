@@ -36,13 +36,19 @@ class DelegationContext:
     config: RuntimeConfig
 
     @classmethod
-    def root(cls, task_id: UUID, worker_id: str, config: RuntimeConfig) -> "DelegationContext":
+    def root(
+        cls,
+        task_id: UUID,
+        worker_id: str,
+        config: RuntimeConfig,
+        deadline: float | None = None,
+    ) -> "DelegationContext":
         """Create the supervisor context at depth zero."""
         return cls(
             depth=0,
             lineage=(task_id,),
             agent_path=(f"supervisor:{worker_id}",),
-            deadline=monotonic() + config.task_timeout,
+            deadline=deadline if deadline is not None else monotonic() + config.task_timeout,
             config=config,
         )
 
