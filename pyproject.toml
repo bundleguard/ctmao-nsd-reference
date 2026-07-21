@@ -21,6 +21,11 @@ classifiers = [
 ]
 dependencies = []
 
+[project.urls]
+Repository = "https://github.com/bundleguard/ctmao-nsd-reference"
+Issues = "https://github.com/bundleguard/ctmao-nsd-reference/issues"
+Documentation = "https://github.com/bundleguard/ctmao-nsd-reference#readme"
+
 [tool.setuptools.packages.find]
 where = ["src"]
 

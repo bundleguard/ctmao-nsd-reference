@@ -5,8 +5,20 @@ from __future__ import annotations
 import asyncio
 import threading
 import unittest
+from unittest import mock
+from uuid import uuid4
 
-from ctmao_nsd import Orchestrator, OrchestratorClosedError, ResultStatus, RuntimeConfig, TaskSpec
+from ctmao_nsd import (
+    OrchestrationCancelledError,
+    Orchestrator,
+    OrchestratorBusyError,
+    OrchestratorClosedError,
+    ResultStatus,
+    RuntimeConfig,
+    TaskSpec,
+)
+from ctmao_nsd.thread_manager import ThreadManager
+from ctmao_nsd.types import EnvelopeKind, WorkerEnvelope
 
 
 class OrchestratorTests(unittest.IsolatedAsyncioTestCase):
@@ -97,6 +109,117 @@ class OrchestratorTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(any(t.name == "ctmao-worker-A" and t.is_alive() for t in threading.enumerate()))
         with self.assertRaises(OrchestratorClosedError):
             await orchestrator.run({"A": TaskSpec("late")})
+
+    async def test_overlapping_runs_are_rejected_without_losing_first_result(self) -> None:
+        config = RuntimeConfig(task_timeout=0.5)
+        orchestrator = Orchestrator(("A",), config)
+        try:
+            active = asyncio.create_task(
+                orchestrator.run(
+                    {
+                        "A": TaskSpec(
+                            "active-root",
+                            children=(TaskSpec("active-child", duration=0.1),),
+                        )
+                    }
+                )
+            )
+            await asyncio.sleep(0.02)
+            with self.assertRaises(OrchestratorBusyError):
+                await orchestrator.run({"A": TaskSpec("overlap")})
+            report = await asyncio.wait_for(active, timeout=1.0)
+            self.assertEqual(report.results["A"].status, ResultStatus.SUCCEEDED)
+        finally:
+            await orchestrator.close()
+
+    async def test_close_cancels_active_run_without_blocking_event_loop(self) -> None:
+        config = RuntimeConfig(task_timeout=2.0)
+        orchestrator = Orchestrator(("A",), config)
+        active = asyncio.create_task(
+            orchestrator.run(
+                {
+                    "A": TaskSpec(
+                        "active-root",
+                        children=(TaskSpec("active-child", duration=1.0),),
+                    )
+                }
+            )
+        )
+        await asyncio.sleep(0.02)
+        closing = asyncio.create_task(orchestrator.close())
+
+        # This timer must run while close is waiting; a synchronous join in the
+        # event-loop thread would prevent it from completing on time.
+        await asyncio.wait_for(asyncio.sleep(0.02), timeout=0.08)
+        await asyncio.wait_for(closing, timeout=1.0)
+        with self.assertRaises(OrchestrationCancelledError):
+            await asyncio.wait_for(active, timeout=1.0)
+        self.assertFalse(
+            any(
+                thread.name == "ctmao-worker-A" and thread.is_alive()
+                for thread in threading.enumerate()
+            )
+        )
+
+    async def test_cancelled_run_blocks_reuse_until_late_result_drains(self) -> None:
+        config = RuntimeConfig(task_timeout=0.5)
+        orchestrator = Orchestrator(("A",), config)
+        try:
+            active = asyncio.create_task(
+                orchestrator.run(
+                    {
+                        "A": TaskSpec(
+                            "cancelled-root",
+                            children=(TaskSpec("late-child", duration=0.1),),
+                        )
+                    }
+                )
+            )
+            await asyncio.sleep(0.02)
+            active.cancel()
+            with self.assertRaises(asyncio.CancelledError):
+                await active
+            with self.assertRaises(OrchestratorBusyError):
+                await orchestrator.run({"A": TaskSpec("too-early")})
+
+            await asyncio.sleep(0.15)
+            report = await orchestrator.run({"A": TaskSpec("after-drain")})
+            self.assertTrue(report.results["A"].succeeded)
+        finally:
+            await orchestrator.close()
+
+    async def test_all_worker_commands_share_one_absolute_deadline(self) -> None:
+        captured_deadlines: list[float | None] = []
+        original_submit = ThreadManager.submit
+
+        def recording_submit(
+            manager: ThreadManager, worker_id: str, command: object
+        ) -> None:
+            captured_deadlines.append(command.deadline)  # type: ignore[attr-defined]
+            original_submit(manager, worker_id, command)  # type: ignore[arg-type]
+
+        async with Orchestrator(("A", "B")) as orchestrator:
+            with mock.patch.object(ThreadManager, "submit", new=recording_submit):
+                report = await orchestrator.run(
+                    {"A": TaskSpec("root-a"), "B": TaskSpec("root-b")}
+                )
+        self.assertTrue(all(result.succeeded for result in report.results.values()))
+        self.assertEqual(len(captured_deadlines), 2)
+        self.assertIsNotNone(captured_deadlines[0])
+        self.assertEqual(captured_deadlines[0], captured_deadlines[1])
+
+    async def test_dispatcher_ignores_unknown_correlation(self) -> None:
+        async with Orchestrator(("A",)) as orchestrator:
+            assert orchestrator._outbound is not None
+            await orchestrator._outbound.put(
+                WorkerEnvelope(
+                    kind=EnvelopeKind.RESULT,
+                    worker_id="A",
+                    correlation_id=uuid4(),
+                )
+            )
+            report = await orchestrator.run({"A": TaskSpec("real-root")})
+            self.assertTrue(report.results["A"].succeeded)
 
     async def test_unknown_worker_is_rejected(self) -> None:
         async with Orchestrator(("A",)) as orchestrator:
