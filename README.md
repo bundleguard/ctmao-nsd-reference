@@ -185,8 +185,9 @@ blocking call; extensions must preserve and supplement the safety model.
   aggregate to report failure while retaining partial child results.
 - One worker's task failure does not cancel work assigned to another worker.
 - A fatal worker-runtime error is reported through a `WORKER_FAILED` envelope.
-- Shutdown is cooperative and bounded; every owned thread is non-daemon and is
-  joined before `Orchestrator.close()` returns.
+- Shutdown is cooperative. Completed or idle workers are joined before
+  `Orchestrator.close()` returns; closing during a longer active assignment is a
+  known v0.1 hardening gap.
 
 Automatic worker restart, durable replay, retry policy, and process-level crash
 recovery are intentionally future concerns.
@@ -267,6 +268,13 @@ python -m unittest discover -s tests -v
   ownership and deadline rules.
 - The interval constants are extension points in v0.1.0, not background polling
   loops required for correctness.
+- `Orchestrator.run()` is currently single-flight. Applications must not call it
+  concurrently on the same orchestrator instance until a central envelope
+  dispatcher is implemented.
+- Active-task shutdown can exceed the current worker join allowance. Complete a
+  run before closing the orchestrator in v0.1.
+
+See [Hardening status](docs/hardening.md) for verified alpha limitations.
 
 ## Future extensions
 
