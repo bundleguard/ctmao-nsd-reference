@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "ctmao-nsd-reference"
-version = "0.1.0"
-description = "Canonical reference implementation of CTMAO-NSD"
+version = "0.1.1"
+description = "Experimental Python concurrency reference for isolated workers and bounded hierarchical delegation"
 readme = "README.md"
 requires-python = ">=3.11"
 license = {file = "LICENSE"}

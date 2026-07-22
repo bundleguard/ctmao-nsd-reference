@@ -1,14 +1,20 @@
 # Cross-Thread Multi-Agent Orchestration with Nested Sub-Agent Delegation
 
 **Cross-Thread Multi-Agent Orchestration with Nested Sub-Agent Delegation
-(CTMAO-NSD)** is the canonical name used by this repository for one unified
-concurrency architecture. It combines isolated, thread-owned agent runtimes
-with bounded hierarchical task delegation and orchestrator-mediated state
+(CTMAO-NSD)** is this repository's name for an experimental Python concurrency
+pattern and reference runtime. It combines isolated, thread-owned executors
+with bounded hierarchical task execution and orchestrator-mediated state
 exchange.
 
-This repository is a standard-library-only reference implementation for
-architecture research, concurrency experiments, and teaching. It demonstrates
-the control plane and safety boundaries without depending on LangGraph, CrewAI,
+> **Scope of v0.1.1:** an "agent" is a deterministic Python executor with a
+> delegated responsibility. This release does not include an LLM, model
+> provider, autonomous planning, dynamic task decomposition, or model-token
+> budgeting. Task trees are declared by the caller before execution.
+
+This standard-library-only implementation is intended for concurrency research,
+experiments, and teaching. It demonstrates a control plane and safety boundaries
+that future model-backed adapters may use, without claiming that the current
+runtime performs AI decision-making. It does not depend on LangGraph, CrewAI,
 AutoGen, Swarm, Semantic Kernel, or another orchestration SDK.
 
 ## Relationship to the AI Product Framework
@@ -32,19 +38,21 @@ the two repositories remain independent:
 ## Architectural pattern
 
 CTMAO-NSD is a concurrency architecture in which multiple isolated worker
-threads each own a supervisor agent, an asynchronous runtime, and thread-local
-state; supervisors decompose work into bounded parent-child delegation trees;
-and all permitted state exchange between threads is mediated by a global
-orchestrator through immutable messages and controlled synchronization.
+threads each own a supervisor executor, an asynchronous runtime, and
+thread-local state; supervisors route caller-declared work through bounded
+parent-child execution trees; and all permitted state exchange between threads
+is mediated by a global orchestrator through immutable messages and controlled
+synchronization.
 
 The pattern has two inseparable mechanisms:
 
 - **Cross-Thread Multi-Agent Orchestration** governs worker lifecycle, routing,
-  scheduling, correlation, failure boundaries, capability-token passing, and
-  selected state transfer between isolated runtimes.
-- **Nested Sub-Agent Delegation** governs hierarchical decomposition,
-  supervisor-child routing, recursive execution, ancestry checks, depth and
-  fan-out limits, timeout propagation, and deterministic result aggregation.
+  scheduling, correlation, failure boundaries, synchronization-capability
+  passing, and selected state transfer between isolated runtimes.
+- **Nested Sub-Agent Delegation** governs execution of caller-declared
+  hierarchical task trees, supervisor-child routing, recursive execution,
+  ancestry checks, depth and fan-out limits, timeout propagation, and
+  deterministic result aggregation.
 
 They are complementary responsibilities within one architecture—not competing
 architectures.
@@ -136,15 +144,16 @@ work or expose worker-local mutable state.
 ### Worker runtime and supervisor agent
 
 `WorkerThread` owns one OS thread and one event loop. The supervisor inside that
-runtime is the only root-routing authority. It validates the root fan-out,
-creates child contexts once, and aggregates results in declared order.
+runtime is the only root-routing authority. It validates the caller-supplied
+root fan-out, creates child contexts once, and aggregates results in declared
+order. It does not select a model, invent tasks, or choose specialists.
 
 ### Child agents and delegation contexts
 
-`ChildAgent` executes a node and may recursively delegate its declared children.
-Every child inherits immutable lineage, agent path, policy, and the root's
-absolute deadline. Reusing an ancestor task ID triggers circular-delegation
-rejection.
+`ChildAgent` is a deterministic runtime executor, not a model-backed AI agent.
+It executes a node and may recursively route its declared children. Every child
+inherits immutable lineage, agent path, policy, and the root's absolute
+deadline. Reusing an ancestor task ID triggers circular-delegation rejection.
 
 ### Thread-local and synchronized memory
 
@@ -258,6 +267,12 @@ python -m unittest discover -s tests -v
 ## Trade-offs and limitations
 
 - Python threads do not provide process or security isolation.
+- v0.1.1 contains no LLM calls, autonomous planning, model-provider adapters,
+  prompt execution, or model-token budget enforcement.
+- Task trees are caller-declared; supervisors do not dynamically create or
+  select work.
+- `SyncToken` is a single-use memory-synchronization capability. It is unrelated
+  to LLM input/output token accounting.
 - CPU-bound Python work remains constrained by the CPython GIL; processes or
   native extensions may be more appropriate.
 - Central orchestration and snapshot validation add latency and can become a
@@ -267,7 +282,7 @@ python -m unittest discover -s tests -v
 - A supervisor processes its declared root branches deterministically; an
   application can add bounded sibling concurrency while retaining the same
   ownership and deadline rules.
-- The interval constants are extension points in v0.1.0, not background polling
+- The interval constants are extension points in v0.1.x, not background polling
   loops required for correctness.
 - `Orchestrator.run()` is intentionally single-flight. A second overlapping call
   raises `OrchestratorBusyError`; all worker envelopes still pass through one
@@ -280,6 +295,11 @@ See [Hardening status](docs/hardening.md) for verified alpha limitations.
 
 ## Future extensions
 
+- A public executor protocol for product-defined task handlers
+- Optional model-backed executor adapters outside the standard-library core
+- Policy-driven dynamic task planning that preserves depth, fan-out, and
+  deadline bounds
+- Explicit LLM context and token-budget policies, separate from `SyncToken`
 - Durable message transport and restartable assignments
 - Pluggable task executors and supervisor routing policies
 - Heartbeats, explicit health states, drain policies, and worker restart
@@ -291,9 +311,11 @@ See [Hardening status](docs/hardening.md) for verified alpha limitations.
 
 The first use of the name is **Cross-Thread Multi-Agent Orchestration with
 Nested Sub-Agent Delegation (CTMAO-NSD)**; later references use **CTMAO-NSD**.
-This exact name is canonical within this repository. The implementation is a
-reference foundation, not a claim of legal exclusivity, novelty, external
-recognition, or industry standardization.
+This exact name is canonical only within this repository. "Agent" names an
+execution role in this version; it does not imply LLM use or autonomous
+decision-making. The implementation is an experimental reference, not a claim
+of legal exclusivity, novelty, external recognition, or industry
+standardization.
 
 Build-time Codex sub-agents used to help review this repository are unrelated to
 the runtime agents demonstrated by CTMAO-NSD.

@@ -1,8 +1,9 @@
 # CTMAO-NSD v0.1 Hardening Status
 
-The v0.1 implementation is an alpha reference and teaching runtime. Its core
-concurrency safety controls are implemented and covered by the standard-library
-test suite.
+The v0.1 implementation is an experimental concurrency reference and teaching
+runtime. Its core concurrency safety controls are implemented and covered by
+the standard-library test suite. It is not yet a model-backed AI orchestration
+system.
 
 ## Resolved Controls
 
@@ -57,5 +58,11 @@ events come from actual worker envelopes rather than optimistic shutdown claims.
 - Cancellation cannot forcibly interrupt a blocking native or synchronous call.
 - The reference task executor is declarative; product adapters and arbitrary
   handler registration are future extension points.
+- Agents are deterministic Python executors; LLM calls, autonomous planning,
+  and model-provider adapters are not implemented.
+- Complete task trees are caller-declared rather than dynamically planned by a
+  supervisor.
+- `SyncToken` protects memory synchronization and does not enforce LLM token
+  budgets.
 
 These are explicit scope limits, not untracked correctness failures.
