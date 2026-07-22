@@ -3,6 +3,17 @@
 This document supplements the repository-level definition of **Cross-Thread
 Multi-Agent Orchestration with Nested Sub-Agent Delegation (CTMAO-NSD)**.
 
+## Runtime terminology
+
+In v0.1.1, `SupervisorAgent` and `ChildAgent` are deterministic Python
+executors. They do not call an LLM, select a model, plan autonomously, or invent
+new tasks. The caller supplies the complete immutable `TaskSpec` tree before
+execution, and the runtime enforces how that tree crosses ownership and
+delegation boundaries.
+
+`SyncToken` is a single-use capability authorizing one memory snapshot. It is
+not an LLM context-window or input/output token budget.
+
 ## Ownership map
 
 | Component | Owner | Mutable? | Crosses threads? |
@@ -25,8 +36,8 @@ selection, revision policy, or the orchestrator-only synchronization invariant.
 1. The orchestrator creates an immutable `WorkerCommand` and a single-use
    `SyncToken` tied to the target worker.
 2. `call_soon_threadsafe` schedules the command on the worker-owned event loop.
-3. The supervisor builds a root `DelegationContext` at depth `0` with one
-   absolute monotonic deadline.
+3. The supervisor receives a caller-declared task tree and builds a root
+   `DelegationContext` at depth `0` with one absolute monotonic deadline.
 4. Each child derivation appends its task ID and agent name while retaining the
    original deadline.
 5. The worker returns an immutable result tree and an allowlisted memory
@@ -52,7 +63,7 @@ other worker results are collected.
 ## Shutdown semantics
 
 `close()` stops accepting work, sends cooperative `STOP` commands, waits for
-worker coroutines to return, and joins every non-daemon thread. v0.1.0 executes
+worker coroutines to return, and joins every non-daemon thread. v0.1.x executes
 one root assignment at a time per worker, so a stop command naturally follows
 the active assignment in its inbox. Explicit drain and cancellation commands
 are planned extensions for multi-assignment worker concurrency.

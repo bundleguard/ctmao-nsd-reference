@@ -1,4 +1,4 @@
-"""Run the canonical two-thread CTMAO-NSD demonstration."""
+"""Run the deterministic two-thread CTMAO-NSD demonstration."""
 
 from __future__ import annotations
 
