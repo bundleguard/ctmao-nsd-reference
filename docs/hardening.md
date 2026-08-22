@@ -1,9 +1,10 @@
-# CTMAO-NSD v0.1 Hardening Status
+# CTMAO-NSD v0.2 Hardening Status
 
-The v0.1 implementation is an experimental concurrency reference and teaching
-runtime. Its core concurrency safety controls are implemented and covered by
-the standard-library test suite. It is not yet a model-backed AI orchestration
-system.
+The v0.2 implementation is an experimental concurrency and observability
+reference. Its core concurrency safety controls and additive conference path
+are covered by the standard-library test suite. The deterministic runtime is
+the default; an application may supply a model provider through the optional
+runtime contract, but no provider or credentials are bundled.
 
 ## Resolved Controls
 
@@ -56,10 +57,14 @@ events come from actual worker envelopes rather than optimistic shutdown claims.
 - Worker restart and assignment replay are not implemented.
 - Transport and synchronized memory are in-process and non-durable.
 - Cancellation cannot forcibly interrupt a blocking native or synchronous call.
-- The reference task executor is declarative; product adapters and arbitrary
-  handler registration are future extension points.
-- Agents are deterministic Python executors; LLM calls, autonomous planning,
-  and model-provider adapters are not implemented.
+- The default task executor is deterministic. `ModelBackedRuntime` provides a
+  bounded provider-neutral node-execution hook, not autonomous planning or
+  provider-controlled delegation.
+- Codex adapters are host-fed prototypes for currently observed records. They
+  do not launch Codex, connect to desktop task storage, or guarantee a
+  version-stable external schema.
+- The event bus, dashboard replay, transcripts, and adapter replay state are
+  in-memory and non-durable.
 - Complete task trees are caller-declared rather than dynamically planned by a
   supervisor.
 - `SyncToken` protects memory synchronization and does not enforce LLM token

@@ -31,6 +31,7 @@ class EnvelopeKind(str, Enum):
     """Messages emitted from a worker to the orchestrator."""
 
     RESULT = "result"
+    EVENT = "event"
     WORKER_FAILED = "worker_failed"
     WORKER_STOPPED = "worker_stopped"
 
@@ -92,6 +93,19 @@ class MemorySnapshot:
 
 
 @dataclass(frozen=True, slots=True)
+class WorkerObservation:
+    """Immutable execution fact emitted by a worker for central normalization."""
+
+    event_type: str
+    summary: str
+    task_id: UUID | None = None
+    parent_task_id: UUID | None = None
+    agent_path: tuple[str, ...] = ()
+    status: str | None = None
+    importance: str = "normal"
+
+
+@dataclass(frozen=True, slots=True)
 class WorkerCommand:
     """Immutable orchestrator-to-worker message."""
 
@@ -100,6 +114,8 @@ class WorkerCommand:
     task: TaskSpec | None = None
     sync_token: SyncToken | None = None
     deadline: float | None = None
+    session_id: UUID | None = None
+    run_id: UUID | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -114,3 +130,5 @@ class WorkerEnvelope:
     sync_token: SyncToken | None = None
     error: str | None = None
     emitted_at: float = field(default_factory=time)
+    run_id: UUID | None = None
+    observation: WorkerObservation | None = None

@@ -20,6 +20,7 @@ class RuntimeConfig:
     task_timeout: float = TASK_TIMEOUT
     thread_sync_interval: float = THREAD_SYNC_INTERVAL
     memory_sync_interval: float = MEMORY_SYNC_INTERVAL
+    publish_result_summaries: bool = False
 
     def __post_init__(self) -> None:
         """Reject policies that could create ambiguous runtime behavior."""
@@ -31,3 +32,5 @@ class RuntimeConfig:
             raise ValueError("task_timeout must be positive")
         if self.thread_sync_interval <= 0 or self.memory_sync_interval <= 0:
             raise ValueError("sync intervals must be positive")
+        if not isinstance(self.publish_result_summaries, bool):
+            raise ValueError("publish_result_summaries must be a boolean")

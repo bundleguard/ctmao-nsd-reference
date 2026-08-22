@@ -3,14 +3,63 @@
 from __future__ import annotations
 
 import asyncio
+import threading
 import unittest
 
+from ctmao_nsd import DeterministicRuntime
 from ctmao_nsd.config import RuntimeConfig
-from ctmao_nsd.thread_manager import WorkerThread, WorkerUnavailableError
+from ctmao_nsd.thread_manager import ThreadManager, WorkerThread, WorkerUnavailableError
 from ctmao_nsd.types import CommandKind, EnvelopeKind, WorkerCommand, WorkerEnvelope
 
 
 class WorkerThreadTests(unittest.IsolatedAsyncioTestCase):
+    async def test_runtime_construction_does_not_delay_worker_readiness(self) -> None:
+        outbound: asyncio.Queue[WorkerEnvelope] = asyncio.Queue()
+        release = threading.Event()
+
+        def delayed_factory() -> DeterministicRuntime:
+            release.wait(1.0)
+            return DeterministicRuntime()
+
+        worker = WorkerThread(
+            "delayed-runtime",
+            RuntimeConfig(),
+            asyncio.get_running_loop(),
+            outbound,
+            delayed_factory,
+        )
+        await asyncio.wait_for(asyncio.to_thread(worker.start, 0.1), timeout=0.5)
+        release.set()
+        worker.request_stop()
+        await asyncio.to_thread(worker.join, 1.0)
+
+    async def test_startup_rollback_includes_worker_that_raises(self) -> None:
+        class FailedStartWorker:
+            is_alive = True
+
+            def __init__(self) -> None:
+                self.stop_requested = False
+                self.joined = False
+
+            def start(self) -> None:
+                raise TimeoutError("not ready")
+
+            def request_stop(self) -> None:
+                self.stop_requested = True
+
+            def join(self, timeout: float) -> None:
+                self.joined = True
+
+        manager = ThreadManager(
+            ("A",), RuntimeConfig(), asyncio.get_running_loop(), asyncio.Queue()
+        )
+        failed = FailedStartWorker()
+        manager._workers = {"A": failed}  # type: ignore[assignment]
+        with self.assertRaises(TimeoutError):
+            manager.start_all()
+        self.assertTrue(failed.stop_requested)
+        self.assertTrue(failed.joined)
+
     async def test_fatal_command_retains_correlation_and_worker_rejects_reuse(
         self,
     ) -> None:

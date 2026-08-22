@@ -110,6 +110,30 @@ class OrchestratorTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(OrchestratorClosedError):
             await orchestrator.run({"A": TaskSpec("late")})
 
+    async def test_close_can_retry_after_bounded_worker_join_failure(self) -> None:
+        class FlakyThreads:
+            def __init__(self) -> None:
+                self.calls = 0
+
+            async def stop_all(self, timeout: float) -> None:
+                self.calls += 1
+                if self.calls == 1:
+                    raise TimeoutError("worker still stopping")
+
+        orchestrator = Orchestrator(("A",))
+        threads = FlakyThreads()
+        orchestrator._threads = threads  # type: ignore[assignment]
+        orchestrator._started = True
+
+        with self.assertRaises(TimeoutError):
+            await orchestrator.close()
+        with self.assertRaises(OrchestratorClosedError):
+            await orchestrator.run({"A": TaskSpec("late")})
+
+        await orchestrator.close()
+        self.assertEqual(threads.calls, 2)
+        self.assertTrue(orchestrator._closed)
+
     async def test_overlapping_runs_are_rejected_without_losing_first_result(self) -> None:
         config = RuntimeConfig(task_timeout=0.5)
         orchestrator = Orchestrator(("A",), config)

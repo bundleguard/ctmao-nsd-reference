@@ -6,16 +6,20 @@ import asyncio
 import logging
 import threading
 from collections.abc import Iterable
+from collections.abc import Callable
 from uuid import UUID, uuid4
 
 from .config import RuntimeConfig
+from .agent_runtime import AgentRuntime, DeterministicRuntime
 from .memory import ThreadLocalMemory
+from .normalized_events import redact_text
 from .supervisor import SupervisorAgent
 from .types import (
     CommandKind,
     EnvelopeKind,
     WorkerCommand,
     WorkerEnvelope,
+    WorkerObservation,
 )
 
 LOGGER = logging.getLogger(__name__)
@@ -34,17 +38,21 @@ class WorkerThread:
         config: RuntimeConfig,
         orchestrator_loop: asyncio.AbstractEventLoop,
         outbound: asyncio.Queue[WorkerEnvelope],
+        runtime_factory: Callable[[], AgentRuntime] | None = None,
     ) -> None:
         """Prepare the thread without creating loop-bound worker resources."""
         self.worker_id = worker_id
         self._config = config
         self._orchestrator_loop = orchestrator_loop
         self._outbound = outbound
+        self._runtime_factory = runtime_factory or DeterministicRuntime
         self._worker_loop: asyncio.AbstractEventLoop | None = None
         self._inbox: asyncio.Queue[WorkerCommand] | None = None
         self._ready = threading.Event()
         self._accepting = threading.Event()
+        self._startup_error: str | None = None
         self._active_correlation: UUID | None = None
+        self._active_run_id: UUID | None = None
         self._runner_task: asyncio.Task[None] | None = None
         self._stop_correlation: UUID | None = None
         self._stop_requested = threading.Event()
@@ -69,6 +77,10 @@ class WorkerThread:
         self._thread.start()
         if not self._ready.wait(timeout):
             raise TimeoutError(f"worker {self.worker_id} did not become ready")
+        if self._startup_error is not None:
+            raise WorkerUnavailableError(
+                f"worker {self.worker_id} failed during startup: {self._startup_error}"
+            )
 
     def submit(self, command: WorkerCommand) -> None:
         """Transfer an immutable command into the worker-owned event loop."""
@@ -121,7 +133,12 @@ class WorkerThread:
         try:
             asyncio.run(self._run())
         except Exception as exc:  # protect the process from one worker failure
-            LOGGER.exception("Worker %s crashed", self.worker_id)
+            safe_error, _ = redact_text(str(exc))
+            self._startup_error = f"{type(exc).__name__}: {safe_error}"
+            self._ready.set()
+            LOGGER.error(
+                "Worker %s crashed: %s", self.worker_id, self._startup_error
+            )
             self._accepting.clear()
             self._emit(
                 WorkerEnvelope(
@@ -131,7 +148,7 @@ class WorkerThread:
                         self._active_correlation
                         or WorkerCommand(CommandKind.STOP).correlation_id
                     ),
-                    error=f"{type(exc).__name__}: {exc}",
+                    error=self._startup_error,
                 )
             )
         finally:
@@ -141,17 +158,27 @@ class WorkerThread:
         self._runner_task = asyncio.current_task()
         self._worker_loop = asyncio.get_running_loop()
         self._inbox = asyncio.Queue()
+        # Readiness means the thread-owned loop and inbox can accept commands.
+        # Runtime construction remains on this owner thread, but it must not make
+        # startup time out and leave an unaddressable non-daemon thread behind.
+        self._accepting.set()
+        self._ready.set()
         memory = ThreadLocalMemory(
             self.worker_id,
             transferable_keys=("root_task", "last_task", "last_agent_depth"),
         )
-        supervisor = SupervisorAgent(self.worker_id, memory, self._config)
-        self._accepting.set()
-        self._ready.set()
+        supervisor = SupervisorAgent(
+            self.worker_id,
+            memory,
+            self._config,
+            self._emit_observation,
+            self._runtime_factory(),
+        )
         try:
             while True:
                 command = await self._inbox.get()
                 self._active_correlation = command.correlation_id
+                self._active_run_id = command.run_id
                 if command.kind is CommandKind.STOP:
                     self._accepting.clear()
                     self._emit(
@@ -162,6 +189,7 @@ class WorkerThread:
                         )
                     )
                     self._active_correlation = None
+                    self._active_run_id = None
                     return
                 try:
                     if command.task is None or command.sync_token is None:
@@ -178,21 +206,25 @@ class WorkerThread:
                             result=result,
                             snapshot=snapshot,
                             sync_token=command.sync_token,
+                            run_id=command.run_id,
                         )
                     )
                 except Exception as exc:
+                    safe_error, _ = redact_text(str(exc))
                     self._accepting.clear()
                     self._emit(
                         WorkerEnvelope(
                             kind=EnvelopeKind.WORKER_FAILED,
                             worker_id=self.worker_id,
                             correlation_id=command.correlation_id,
-                            error=f"{type(exc).__name__}: {exc}",
+                            run_id=command.run_id,
+                            error=f"{type(exc).__name__}: {safe_error}",
                         )
                     )
                     return
                 finally:
                     self._active_correlation = None
+                    self._active_run_id = None
         except asyncio.CancelledError:
             if not self._stop_requested.is_set():
                 raise
@@ -212,6 +244,20 @@ class WorkerThread:
             self._outbound.put_nowait, envelope
         )
 
+    def _emit_observation(self, observation: WorkerObservation) -> None:
+        """Forward a worker-local fact through the sole outbound channel."""
+        if self._active_correlation is None:
+            return
+        self._emit(
+            WorkerEnvelope(
+                kind=EnvelopeKind.EVENT,
+                worker_id=self.worker_id,
+                correlation_id=self._active_correlation,
+                run_id=self._active_run_id,
+                observation=observation,
+            )
+        )
+
 
 class ThreadManager:
     """Owns the worker collection and provides bounded lifecycle operations."""
@@ -222,13 +268,16 @@ class ThreadManager:
         config: RuntimeConfig,
         orchestrator_loop: asyncio.AbstractEventLoop,
         outbound: asyncio.Queue[WorkerEnvelope],
+        runtime_factory: Callable[[], AgentRuntime] | None = None,
     ) -> None:
         """Construct named worker wrappers."""
         ids = tuple(worker_ids)
         if len(ids) != len(set(ids)):
             raise ValueError("worker identifiers must be unique")
         self._workers = {
-            worker_id: WorkerThread(worker_id, config, orchestrator_loop, outbound)
+            worker_id: WorkerThread(
+                worker_id, config, orchestrator_loop, outbound, runtime_factory
+            )
             for worker_id in ids
         }
 
@@ -242,12 +291,15 @@ class ThreadManager:
         started: list[WorkerThread] = []
         try:
             for worker in self._workers.values():
-                worker.start()
                 started.append(worker)
+                worker.start()
         except Exception:
             for worker in started:
-                worker.submit(WorkerCommand(CommandKind.STOP))
-                worker.join(2.0)
+                if worker.is_alive:
+                    worker.request_stop()
+            for worker in started:
+                if worker.is_alive:
+                    worker.join(2.0)
             raise
 
     def submit(self, worker_id: str, command: WorkerCommand) -> None:

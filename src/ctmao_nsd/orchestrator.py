@@ -5,15 +5,25 @@ from __future__ import annotations
 import asyncio
 import logging
 from contextlib import suppress
+from collections.abc import Callable
 from dataclasses import dataclass
 from time import monotonic
 from types import MappingProxyType
 from typing import Mapping
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from .config import RuntimeConfig
+from .agent_runtime import AgentRuntime
 from .events import Event, EventKind
 from .memory import SharedMemoryHub
+from .normalized_events import (
+    EventImportance,
+    EventOrigin,
+    EvidenceKind,
+    NormalizedEvent,
+    redact_text,
+)
+from .observability import EventBus
 from .thread_manager import ThreadManager, WorkerUnavailableError
 from .types import (
     CommandKind,
@@ -47,6 +57,7 @@ class OrchestrationDeadlineExceeded(TimeoutError):
 @dataclass(slots=True)
 class _PendingRequest:
     worker_id: str
+    run_id: UUID
     future: asyncio.Future[WorkerEnvelope]
 
 
@@ -57,6 +68,8 @@ class OrchestrationReport:
     results: Mapping[str, TaskResult]
     memory_revisions: Mapping[str, int]
     events: tuple[Event, ...]
+    run_id: UUID | None = None
+    normalized_events: tuple[NormalizedEvent, ...] = ()
 
 
 class Orchestrator:
@@ -66,6 +79,9 @@ class Orchestrator:
         self,
         worker_ids: tuple[str, ...] = ("A", "B"),
         config: RuntimeConfig | None = None,
+        *,
+        event_bus: EventBus | None = None,
+        runtime_factory: Callable[[], AgentRuntime] | None = None,
     ) -> None:
         """Create an orchestrator; worker resources start lazily on first run."""
         self._worker_ids = worker_ids
@@ -76,23 +92,35 @@ class Orchestrator:
         self._events: list[Event] = []
         self._started = False
         self._closed = False
+        self._close_requested = False
+        self._close_lock = asyncio.Lock()
         self._run_active = False
         self._run_idle = asyncio.Event()
         self._run_idle.set()
         self._pending: dict[UUID, _PendingRequest] = {}
         self._failed_workers: dict[str, str] = {}
         self._dispatcher_task: asyncio.Task[None] | None = None
+        self._session_id = uuid4()
+        self._current_run_id: UUID | None = None
+        self._event_sequence = 0
+        self._normalized_by_run: dict[UUID, list[NormalizedEvent]] = {}
+        self._event_bus = event_bus
+        self._runtime_factory = runtime_factory
 
     async def start(self) -> None:
         """Create cross-loop channels and start all worker runtimes."""
-        if self._closed:
+        if self._close_requested:
             raise OrchestratorClosedError("orchestrator is closed")
         if self._started:
             return
         loop = asyncio.get_running_loop()
         self._outbound = asyncio.Queue()
         self._threads = ThreadManager(
-            self._worker_ids, self._config, loop, self._outbound
+            self._worker_ids,
+            self._config,
+            loop,
+            self._outbound,
+            self._runtime_factory,
         )
         self._threads.start_all()
         self._started = True
@@ -103,10 +131,17 @@ class Orchestrator:
             Event(EventKind.WORKER_STARTED, worker_id, "worker is ready")
             for worker_id in self._worker_ids
         )
+        for worker_id in self._worker_ids:
+            self._record_normalized(
+                "runtime.worker.started",
+                "worker is ready",
+                worker_id=worker_id,
+                run_id=self._current_run_id,
+            )
 
     async def run(self, assignments: Mapping[str, TaskSpec]) -> OrchestrationReport:
         """Run one root task per selected worker and synchronize their snapshots."""
-        if self._closed:
+        if self._close_requested:
             raise OrchestratorClosedError("orchestrator is closed")
         assignment_copy = dict(assignments)
         unknown = set(assignment_copy).difference(self._worker_ids)
@@ -119,14 +154,40 @@ class Orchestrator:
 
         self._run_active = True
         self._run_idle.clear()
+        run_id = uuid4()
+        self._current_run_id = run_id
+        self._normalized_by_run[run_id] = []
+        self._record_normalized(
+            "orchestration.run.started",
+            f"run started with {len(assignment_copy)} assignment(s)",
+            run_id=run_id,
+            importance=EventImportance.IMPORTANT,
+        )
         try:
-            return await self._run_once(assignment_copy)
+            return await self._run_once(assignment_copy, run_id)
+        except (asyncio.CancelledError, OrchestrationCancelledError):
+            self._record_normalized(
+                "orchestration.run.cancelled",
+                "run cancelled",
+                run_id=run_id,
+                importance=EventImportance.CRITICAL,
+            )
+            raise
+        except Exception as exc:
+            self._record_normalized(
+                "orchestration.run.failed",
+                f"run failed: {type(exc).__name__}",
+                run_id=run_id,
+                importance=EventImportance.CRITICAL,
+            )
+            raise
         finally:
+            self._current_run_id = None
             self._run_active = False
             self._run_idle.set()
 
     async def _run_once(
-        self, assignments: Mapping[str, TaskSpec]
+        self, assignments: Mapping[str, TaskSpec], run_id: UUID
     ) -> OrchestrationReport:
         """Execute one single-flight orchestration run."""
         await self.start()
@@ -146,14 +207,25 @@ class Orchestrator:
                 task=task,
                 sync_token=token,
                 deadline=execution_deadline,
+                session_id=self._session_id,
+                run_id=run_id,
             )
             future: asyncio.Future[WorkerEnvelope] = loop.create_future()
             self._pending[command.correlation_id] = _PendingRequest(
-                worker_id, future
+                worker_id, run_id, future
             )
             futures.append(future)
             self._events.append(
                 Event(EventKind.TASK_STARTED, worker_id, "root task routed", task.task_id)
+            )
+            self._record_normalized(
+                "task.assigned",
+                f"root task assigned to worker {worker_id}",
+                run_id=run_id,
+                worker_id=worker_id,
+                correlation_id=command.correlation_id,
+                task_id=task.task_id,
+                agent_path=(f"supervisor:{worker_id}",),
             )
             try:
                 self._threads.submit(worker_id, command)
@@ -186,10 +258,18 @@ class Orchestrator:
             for envelope in envelopes
             if envelope.result is not None
         }
+        self._record_normalized(
+            "orchestration.run.completed",
+            "run completed",
+            run_id=run_id,
+            importance=EventImportance.IMPORTANT,
+        )
         return OrchestrationReport(
             results=MappingProxyType(dict(results)),
             memory_revisions=MappingProxyType(self._memory.revisions()),
             events=tuple(self._events),
+            run_id=run_id,
+            normalized_events=tuple(self._normalized_by_run[run_id]),
         )
 
     async def _dispatch_outbound(self) -> None:
@@ -197,11 +277,52 @@ class Orchestrator:
         assert self._outbound is not None
         while True:
             envelope = await self._outbound.get()
+            if envelope.kind is EnvelopeKind.EVENT:
+                request = self._pending.get(envelope.correlation_id)
+                if (
+                    request is None
+                    or request.worker_id != envelope.worker_id
+                    or envelope.run_id != request.run_id
+                    or envelope.observation is None
+                ):
+                    LOGGER.warning("Ignoring invalid worker observation envelope")
+                    continue
+                observation = envelope.observation
+                importance = {
+                    "debug": EventImportance.DEBUG,
+                    "high": EventImportance.IMPORTANT,
+                    "critical": EventImportance.CRITICAL,
+                }.get(observation.importance, EventImportance.ROUTINE)
+                try:
+                    self._record_normalized(
+                        observation.event_type,
+                        observation.summary,
+                        run_id=envelope.run_id or self._current_run_id,
+                        worker_id=envelope.worker_id,
+                        correlation_id=envelope.correlation_id,
+                        task_id=observation.task_id,
+                        parent_task_id=observation.parent_task_id,
+                        agent_path=observation.agent_path,
+                        status=observation.status,
+                        origin=EventOrigin.WORKER,
+                        importance=importance,
+                    )
+                except (TypeError, ValueError):
+                    LOGGER.warning("Suppressing invalid worker observation")
+                continue
             if envelope.kind is EnvelopeKind.WORKER_FAILED:
                 message = envelope.error or "unknown worker failure"
                 self._failed_workers[envelope.worker_id] = message
                 self._events.append(
                     Event(EventKind.WORKER_FAILED, envelope.worker_id, message)
+                )
+                self._record_normalized(
+                    "runtime.worker.failed",
+                    message,
+                    run_id=envelope.run_id or self._current_run_id,
+                    worker_id=envelope.worker_id,
+                    correlation_id=envelope.correlation_id,
+                    importance=EventImportance.CRITICAL,
                 )
                 self._fail_worker_requests(
                     envelope.worker_id,
@@ -213,6 +334,14 @@ class Orchestrator:
             if envelope.kind is EnvelopeKind.WORKER_STOPPED:
                 self._events.append(
                     Event(EventKind.WORKER_STOPPED, envelope.worker_id, "worker stopped")
+                )
+                self._record_normalized(
+                    "runtime.worker.stopped",
+                    "worker stopped",
+                    run_id=envelope.run_id or self._current_run_id,
+                    worker_id=envelope.worker_id,
+                    correlation_id=envelope.correlation_id,
+                    importance=EventImportance.IMPORTANT,
                 )
                 self._fail_worker_requests(
                     envelope.worker_id,
@@ -233,6 +362,12 @@ class Orchestrator:
                 self._set_future_exception(
                     request.future,
                     RuntimeError("worker envelope violated correlation ownership"),
+                )
+                continue
+            if envelope.run_id != request.run_id:
+                self._set_future_exception(
+                    request.future,
+                    RuntimeError("worker envelope violated run ownership"),
                 )
                 continue
             if (
@@ -266,6 +401,16 @@ class Orchestrator:
             self._events.append(
                 Event(EventKind.MEMORY_SYNCED, envelope.worker_id, "snapshot accepted")
             )
+            self._record_normalized(
+                "memory.snapshot.accepted",
+                "memory snapshot accepted",
+                run_id=envelope.run_id or self._current_run_id,
+                worker_id=envelope.worker_id,
+                correlation_id=envelope.correlation_id,
+                task_id=envelope.result.task_id,
+                status=envelope.result.status.value,
+                attributes=(("revision", envelope.snapshot.revision),),
+            )
             if not request.future.done():
                 request.future.set_result(envelope)
 
@@ -295,30 +440,113 @@ class Orchestrator:
         """Expose worker thread identities for diagnostics."""
         return self._threads.identities() if self._threads else {}
 
+    @property
+    def session_id(self) -> UUID:
+        """Return the stable observability session identity."""
+        return self._session_id
+
+    def normalized_events(self, run_id: UUID) -> tuple[NormalizedEvent, ...]:
+        """Return the run-scoped normalized events recorded so far."""
+        return tuple(self._normalized_by_run.get(run_id, ()))
+
+    def _record_normalized(
+        self,
+        event_type: str,
+        summary: str,
+        *,
+        run_id: UUID | None = None,
+        worker_id: str | None = None,
+        correlation_id: UUID | None = None,
+        task_id: UUID | None = None,
+        parent_task_id: UUID | None = None,
+        agent_path: tuple[str, ...] = (),
+        status: str | None = None,
+        attributes: tuple[tuple[str, object], ...] = (),
+        origin: EventOrigin = EventOrigin.ORCHESTRATOR,
+        importance: EventImportance = EventImportance.ROUTINE,
+    ) -> NormalizedEvent:
+        safe_summary, redactions = redact_text(summary[:4096])
+        safe_worker_id = (
+            redact_text(worker_id[:256])[0] if worker_id is not None else None
+        )
+        safe_agent_path = tuple(
+            redact_text(component[:256])[0] for component in agent_path[:64]
+        )
+        safe_status = redact_text(status[:256])[0] if status is not None else None
+        safe_attributes = tuple(
+            (key, redact_text(value[:4096])[0] if isinstance(value, str) else value)
+            for key, value in attributes[:64]
+        )
+        field_redacted = (
+            safe_worker_id != worker_id
+            or safe_agent_path != agent_path
+            or safe_status != status
+            or safe_attributes != attributes
+        )
+        if field_redacted and not redactions:
+            redactions = (("redacted", True), ("redaction_rule", "structured-field"))
+        self._event_sequence += 1
+        event = NormalizedEvent(
+            event_type=event_type,
+            session_id=self._session_id,
+            sequence=self._event_sequence,
+            summary=safe_summary,
+            origin=origin,
+            evidence=EvidenceKind.OBSERVED,
+            importance=importance,
+            run_id=run_id,
+            worker_id=safe_worker_id,
+            correlation_id=correlation_id,
+            task_id=task_id,
+            parent_task_id=parent_task_id,
+            agent_path=safe_agent_path,
+            status=safe_status,
+            attributes=safe_attributes,  # type: ignore[arg-type]
+            provenance=(("source", "ctmao-native-runtime"),),
+            redactions=redactions,
+        )
+        if run_id is not None:
+            self._normalized_by_run.setdefault(run_id, []).append(event)
+        if self._event_bus is not None:
+            self._event_bus.publish(event)
+        return event
+
     async def close(self) -> None:
         """Cooperatively stop workers; calling close repeatedly is safe."""
-        if self._closed:
-            return
-        self._closed = True
-        if self._threads is not None:
-            shutdown_timeout = self._config.task_timeout + 2.0
-            await self._threads.stop_all(shutdown_timeout)
-            # Worker threads emit their lifecycle envelopes before terminating.
-            # Yield twice so the orchestrator loop can enqueue and dispatch them.
-            await asyncio.sleep(0)
-            await asyncio.sleep(0)
-        for request in tuple(self._pending.values()):
-            self._set_future_exception(
-                request.future,
-                OrchestrationCancelledError("orchestrator closed during active work"),
-            )
-        self._pending.clear()
-        await self._run_idle.wait()
-        if self._dispatcher_task is not None:
-            self._dispatcher_task.cancel()
-            with suppress(asyncio.CancelledError):
-                await self._dispatcher_task
-            self._dispatcher_task = None
+        async with self._close_lock:
+            if self._closed:
+                return
+            self._close_requested = True
+            shutdown_error: Exception | None = None
+            if self._threads is not None:
+                shutdown_timeout = self._config.task_timeout + 2.0
+                try:
+                    await self._threads.stop_all(shutdown_timeout)
+                except Exception as exc:
+                    # Keep lifecycle state retryable.  A later close can join a
+                    # provider that finished after this bounded attempt.
+                    shutdown_error = exc
+                # Worker threads emit lifecycle envelopes before terminating.
+                # Yield twice so the orchestrator can dispatch those already sent.
+                await asyncio.sleep(0)
+                await asyncio.sleep(0)
+            for request in tuple(self._pending.values()):
+                self._set_future_exception(
+                    request.future,
+                    OrchestrationCancelledError(
+                        "orchestrator closed during active work"
+                    ),
+                )
+            self._pending.clear()
+            await self._run_idle.wait()
+            if shutdown_error is not None:
+                raise shutdown_error
+            if self._dispatcher_task is not None:
+                self._dispatcher_task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await self._dispatcher_task
+                self._dispatcher_task = None
+            self._closed = True
 
     async def __aenter__(self) -> "Orchestrator":
         """Start workers for an asynchronous context manager."""

@@ -6,15 +6,17 @@ pattern and reference runtime. It combines isolated, thread-owned executors
 with bounded hierarchical task execution and orchestrator-mediated state
 exchange.
 
-> **Scope of v0.1.1:** an "agent" is a deterministic Python executor with a
-> delegated responsibility. This release does not include an LLM, model
-> provider, autonomous planning, dynamic task decomposition, or model-token
-> budgeting. Task trees are declared by the caller before execution.
+> **Scope of v0.2.0:** the default agents remain deterministic Python executors
+> with caller-declared task trees. This release adds normalized observability,
+> a local conference UI, provider-neutral speech and model-runtime contracts,
+> and host-fed Codex adapter prototypes. It does not bundle an LLM provider,
+> autonomous planning, dynamic task decomposition, or model-token budgeting.
 
 This standard-library-only implementation is intended for concurrency research,
-experiments, and teaching. It demonstrates a control plane and safety boundaries
-that future model-backed adapters may use, without claiming that the current
-runtime performs AI decision-making. It does not depend on LangGraph, CrewAI,
+experiments, and teaching. Its deterministic runtime demonstrates a control
+plane and safety boundaries; the optional model-runtime contract can call an
+application-supplied provider without granting it orchestration authority. No
+provider implementation or credentials are bundled. It does not depend on LangGraph, CrewAI,
 AutoGen, Swarm, Semantic Kernel, or another orchestration SDK.
 
 ## Relationship to the AI Product Framework
@@ -223,32 +225,68 @@ Run the test suite with no test-framework dependency:
 python -m unittest discover -s tests -v
 ```
 
+## Live Agent Conference
+
+The additive observability layer turns genuine runtime facts into a live local
+dashboard and spoken conference. It does not expose private reasoning or invent
+dialogue. Every transcript turn retains its source event ID, and redaction runs
+before browser or speech presentation.
+
+```bash
+python examples/live_conference.py
+```
+
+Open the printed loopback URL; the normal demo waits for its first listener
+before beginning. It exchanges controlled, explicitly supplied findings through
+a nested delegation, contains one intentionally failed branch, and shows the
+resulting delegation tree and source-backed transcript. Conference/Briefing
+mode, global and per-agent mute, per-agent voice overrides, and locally installed
+browser voices are available. Use `--hold 0` for an automated smoke run. Audio
+is optional: transcript-only mode and the `NullSpeechProvider` work without a
+speech service.
+
+Normalized events are available in `OrchestrationReport.normalized_events` and
+through an optional failure-isolated `EventBus`. The legacy `events` report
+field remains available for v0.1 compatibility.
+
+## Agent runtime boundary
+
+`DeterministicRuntime` remains the default. `ModelBackedRuntime` defines an
+optional provider-neutral node-execution boundary; it does not grant a model
+authority to create tasks, change delegation, or bypass deadlines. No vendor
+provider or credentials are bundled. Applications can supply a thread-owned
+runtime factory and contract-test it with their own adapter.
+
+## Codex external adapter prototype
+
+The standard-library-only `CodexExecJsonlAdapter` is a prototype for record
+shapes currently observed from `codex exec --json`. It observes explicit
+thread, turn, message, and tool lifecycle records from a compatible host-fed
+stream; it never launches Codex, reads credentials, or consumes reasoning
+items. Agent-message text is disabled by default and must be explicitly enabled.
+
+```bash
+codex exec --json "summarize the repository" \
+  | python examples/codex_jsonl_adapter.py
+```
+
+For an opted-in transcript, add `--include-message-text`; redaction still runs
+before normalized output. Keep Codex stderr separate from stdout. The adapter
+does not infer nested-agent identity or delegation when the stream does not
+expose it. `CodexThreadSnapshotAdapter` additionally accepts a schema-v1 task
+snapshot supplied by an authorized host integration; it does not treat
+`codex://` deep links as an API.
+
 ## Repository layout
 
 ```text
-.
-├── README.md
-├── LICENSE
-├── pyproject.toml
-├── main.py
-├── docs/
-│   └── architecture.md
-├── examples/
-│   └── two_threads.py
-├── src/ctmao_nsd/
-│   ├── agent.py
-│   ├── child_agent.py
-│   ├── config.py
-│   ├── context.py
-│   ├── delegation.py
-│   ├── events.py
-│   ├── logging_config.py
-│   ├── memory.py
-│   ├── orchestrator.py
-│   ├── supervisor.py
-│   ├── thread_manager.py
-│   └── types.py
-└── tests/
+src/ctmao_nsd/  Runtime, normalized events, observability, conference, speech,
+                local UI, model-runtime, and adapter modules
+tests/          Standard-library runtime, concurrency, privacy, UI, speech,
+                conference, and adapter tests
+examples/       Deterministic runtime, live conference, and Codex JSONL demos
+docs/           Architecture, protocols, operating guidance, and ADRs
+main.py         Original deterministic two-worker demonstration
 ```
 
 ## Benefits
@@ -267,8 +305,10 @@ python -m unittest discover -s tests -v
 ## Trade-offs and limitations
 
 - Python threads do not provide process or security isolation.
-- v0.1.1 contains no LLM calls, autonomous planning, model-provider adapters,
-  prompt execution, or model-token budget enforcement.
+- v0.2.0 bundles no model provider or credentials and performs no model call by
+  default. Its optional `ModelBackedRuntime` invokes only an
+  application-supplied provider. Autonomous planning, provider-managed tools,
+  and model-token budget enforcement are not implemented.
 - Task trees are caller-declared; supervisors do not dynamically create or
   select work.
 - `SyncToken` is a single-use memory-synchronization capability. It is unrelated
@@ -282,7 +322,7 @@ python -m unittest discover -s tests -v
 - A supervisor processes its declared root branches deterministically; an
   application can add bounded sibling concurrency while retaining the same
   ownership and deadline rules.
-- The interval constants are extension points in v0.1.x, not background polling
+- The interval constants are extension points in v0.x, not background polling
   loops required for correctness.
 - `Orchestrator.run()` is intentionally single-flight. A second overlapping call
   raises `OrchestratorBusyError`; all worker envelopes still pass through one

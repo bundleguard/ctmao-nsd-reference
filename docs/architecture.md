@@ -5,11 +5,11 @@ Multi-Agent Orchestration with Nested Sub-Agent Delegation (CTMAO-NSD)**.
 
 ## Runtime terminology
 
-In v0.1.1, `SupervisorAgent` and `ChildAgent` are deterministic Python
-executors. They do not call an LLM, select a model, plan autonomously, or invent
-new tasks. The caller supplies the complete immutable `TaskSpec` tree before
-execution, and the runtime enforces how that tree crosses ownership and
-delegation boundaries.
+In v0.2.0, `SupervisorAgent` and `ChildAgent` use `DeterministicRuntime` by
+default. An application may inject `ModelBackedRuntime`, but the model provider
+executes only the current node: it cannot plan, alter the immutable `TaskSpec`
+tree, or invent delegation. The runtime enforces how the caller-supplied tree
+crosses ownership and delegation boundaries.
 
 `SyncToken` is a single-use capability authorizing one memory snapshot. It is
 not an LLM context-window or input/output token budget.
@@ -62,8 +62,21 @@ other worker results are collected.
 
 ## Shutdown semantics
 
-`close()` stops accepting work, sends cooperative `STOP` commands, waits for
-worker coroutines to return, and joins every non-daemon thread. v0.1.x executes
-one root assignment at a time per worker, so a stop command naturally follows
-the active assignment in its inbox. Explicit drain and cancellation commands
-are planned extensions for multi-assignment worker concurrency.
+`close()` stops accepting work, requests cancellation on each worker-owned
+event loop, waits for cooperative coroutine cleanup, and joins every non-daemon
+thread outside the caller event loop. Explicit drain and per-task cancellation
+commands remain future extensions.
+
+## Additive observability and runtime boundaries
+
+The normalized event layer is additive to the v0.1 diagnostic `Event` record.
+Worker-local facts travel as immutable `EVENT` envelopes through the existing
+single outbound dispatcher. The orchestrator validates correlation ownership,
+assigns one central observed sequence, redacts presentation text, and then
+publishes to a bounded failure-isolated `EventBus`. No UI, speech provider, or
+external adapter consumes worker result envelopes directly.
+
+`AgentRuntime` separates node intelligence from orchestration. The default
+`DeterministicRuntime` preserves v0.1.1 behavior. An optional
+`ModelBackedRuntime` delegates one node to a provider adapter but cannot create
+children, alter deadlines, or bypass delegation policy.
