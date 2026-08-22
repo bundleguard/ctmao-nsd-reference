@@ -27,6 +27,7 @@ class ChildAgent(Agent):
         event_sink: Callable[[WorkerObservation], None] | None = None,
         runtime: AgentRuntime | None = None,
         publish_result_summaries: bool = False,
+        publish_agent_messages: bool = False,
     ) -> None:
         """Bind the agent to one worker and its private memory."""
         self._worker_id = worker_id
@@ -34,6 +35,7 @@ class ChildAgent(Agent):
         self._event_sink = event_sink
         self._runtime = runtime or DeterministicRuntime()
         self._publish_result_summaries = publish_result_summaries
+        self._publish_agent_messages = publish_agent_messages
 
     async def execute(self, task: TaskSpec, context: DelegationContext) -> TaskResult:
         """Run a node within the execution tree's single absolute deadline."""
@@ -124,6 +126,7 @@ class ChildAgent(Agent):
                     self._event_sink,
                     self._runtime,
                     self._publish_result_summaries,
+                    self._publish_agent_messages,
                 ).execute(
                     child_task, child_context
                 )
@@ -180,6 +183,30 @@ class ChildAgent(Agent):
                     agent_path=context.agent_path,
                     status="reported",
                     importance="high",
+                )
+            )
+        if (
+            self._publish_agent_messages
+            and task.publish_output
+            and result.succeeded
+            and result.output
+        ):
+            self._emit(
+                WorkerObservation(
+                    "message.sent",
+                    result.output,
+                    task_id=task.task_id,
+                    parent_task_id=(
+                        context.lineage[-2] if len(context.lineage) > 1 else None
+                    ),
+                    agent_path=context.agent_path,
+                    status="delivered",
+                    importance="high",
+                    attributes=(
+                        ("speaker_id", self._worker_id),
+                        ("recipient_id", task.recipient_id),
+                        ("message_kind", task.message_kind),
+                    ),
                 )
             )
         event_type = "task.completed" if result.succeeded else f"task.{status.value}"

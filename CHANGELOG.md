@@ -2,6 +2,31 @@
 
 All notable changes to this project are documented in this file.
 
+## [0.3.0] - 2026-08-22
+
+### Added
+
+- Authenticated interactive start, cancel, state, and live SSE paths.
+- Researcher and Builder contributions, Reviewer critique, and Moderator
+  synthesis with genuine public outputs passed into later rounds.
+- Double opt-in public agent messages through runtime policy and per-task
+  authorization.
+- Conference-first UI with task entry, recognizable participants, voices,
+  decisions, provenance, and a separate technical log.
+- Optional bounded OpenAI Responses API provider plus an offline deterministic
+  conference provider.
+
+### Changed
+
+- Lifecycle narration moved behind the technical log; only explicit
+  `message.sent` evidence appears in the primary conversation.
+- Version metadata and server identity advanced to v0.3.
+
+### Compatibility
+
+- The deterministic runtime, original examples, legacy event fields, and v0.2
+  dashboard remain available. Add `view=legacy` to the URL for the old view.
+
 ## [0.2.0] - 2026-08-22
 
 ### Added

@@ -1,7 +1,7 @@
-# CTMAO-NSD v0.2 Hardening Status
+# CTMAO-NSD v0.3 Hardening Status
 
-The v0.2 implementation is an experimental concurrency and observability
-reference. Its core concurrency safety controls and additive conference path
+The v0.3 implementation is an experimental concurrency and conference
+reference. Its core concurrency safety controls and interactive conference path
 are covered by the standard-library test suite. The deterministic runtime is
 the default; an application may supply a model provider through the optional
 runtime contract, but no provider or credentials are bundled.
@@ -60,6 +60,9 @@ events come from actual worker envelopes rather than optimistic shutdown claims.
 - The default task executor is deterministic. `ModelBackedRuntime` provides a
   bounded provider-neutral node-execution hook, not autonomous planning or
   provider-controlled delegation.
+- The optional OpenAI provider is a bounded text-completion adapter, not a tool
+  runtime. It requires explicit host configuration and transmits selected
+  conference content to the provider without making the local server public.
 - Codex adapters are host-fed prototypes for currently observed records. They
   do not launch Codex, connect to desktop task storage, or guarantee a
   version-stable external schema.

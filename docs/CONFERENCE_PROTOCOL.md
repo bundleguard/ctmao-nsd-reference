@@ -39,6 +39,19 @@ is explicitly suitable for presentation; those source-backed outputs become
 `finding.reported` and delegation-result events and still pass through central
 redaction before transcript or speech.
 
+## Interactive public messages
+
+The primary v0.3 conversation contains only `message.sent` events. A successful
+runtime output becomes such an event only when both the runtime configuration
+and the individual task explicitly authorize publication. Attributes record the
+stable public speaker, recipient, and message kind. Later conference rounds
+receive earlier public output strings as actual inputs; the system does not
+invent replies from lifecycle events.
+
+Start, completion, delegation, memory, and worker events remain available in the
+technical log. They are not rendered as conversational speech in the primary
+view. The legacy v0.2 projection remains available for diagnostics.
+
 ## Speaker and voice identity
 
 Identity follows the logical agent, not the worker thread. The current native

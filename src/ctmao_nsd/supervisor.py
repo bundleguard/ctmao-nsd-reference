@@ -71,6 +71,7 @@ class SupervisorAgent:
                         self._event_sink,
                         self._runtime,
                         self._config.publish_result_summaries,
+                        self._config.publish_agent_messages,
                     ).execute(
                         child_task, child_context
                     )

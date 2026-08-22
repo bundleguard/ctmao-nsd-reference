@@ -21,6 +21,7 @@ class RuntimeConfig:
     thread_sync_interval: float = THREAD_SYNC_INTERVAL
     memory_sync_interval: float = MEMORY_SYNC_INTERVAL
     publish_result_summaries: bool = False
+    publish_agent_messages: bool = False
 
     def __post_init__(self) -> None:
         """Reject policies that could create ambiguous runtime behavior."""
@@ -34,3 +35,5 @@ class RuntimeConfig:
             raise ValueError("sync intervals must be positive")
         if not isinstance(self.publish_result_summaries, bool):
             raise ValueError("publish_result_summaries must be a boolean")
+        if not isinstance(self.publish_agent_messages, bool):
+            raise ValueError("publish_agent_messages must be a boolean")

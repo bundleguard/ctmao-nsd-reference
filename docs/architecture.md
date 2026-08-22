@@ -5,7 +5,7 @@ Multi-Agent Orchestration with Nested Sub-Agent Delegation (CTMAO-NSD)**.
 
 ## Runtime terminology
 
-In v0.2.0, `SupervisorAgent` and `ChildAgent` use `DeterministicRuntime` by
+In v0.3.0, `SupervisorAgent` and `ChildAgent` use `DeterministicRuntime` by
 default. An application may inject `ModelBackedRuntime`, but the model provider
 executes only the current node: it cannot plan, alter the immutable `TaskSpec`
 tree, or invent delegation. The runtime enforces how the caller-supplied tree
@@ -80,3 +80,20 @@ external adapter consumes worker result envelopes directly.
 `DeterministicRuntime` preserves v0.1.1 behavior. An optional
 `ModelBackedRuntime` delegates one node to a provider adapter but cannot create
 children, alter deadlines, or bypass delegation policy.
+
+## Interactive conference application
+
+`InteractiveConference` is an application layer above the unchanged
+orchestrator. It runs three bounded rounds: Researcher and Builder in parallel,
+Reviewer with both genuine public outputs, then Moderator with all public
+messages. It never lets a model create `TaskSpec` nodes or address worker queues.
+
+Public conversation is double-authorized:
+`RuntimeConfig.publish_agent_messages` and the individual
+`TaskSpec.publish_output` must both be true. The worker emits `message.sent` only
+after a successful runtime result. Lifecycle facts remain separate.
+
+The token-protected HTTP control plane schedules work through
+`InteractiveConference`; it does not consume result envelopes. Token, Host, and
+Origin validation protect every state-changing route, and only one conference
+is admitted at a time.

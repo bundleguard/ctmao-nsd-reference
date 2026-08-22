@@ -12,6 +12,7 @@ from ctmao_nsd.conference import (
     assign_voices,
     project_conference_turns,
     project_briefing,
+    project_message_turns,
 )
 from ctmao_nsd.normalized_events import EventOrigin, EvidenceKind, NormalizedEvent
 
@@ -144,6 +145,32 @@ class ConferenceTests(unittest.TestCase):
             event_id=EVENT,
         )
         self.assertEqual(project_conference_turns((event,))[0].speaker_id, "orchestrator")
+
+    def test_message_projection_uses_explicit_public_speaker(self) -> None:
+        message = NormalizedEvent(
+            "message.sent",
+            SESSION,
+            1,
+            "A genuine public contribution.",
+            EventOrigin.WORKER,
+            EvidenceKind.OBSERVED,
+            worker_id="worker-1",
+            agent_path=("internal", "path"),
+            attributes=(("speaker_id", "Researcher"),),
+            event_id=EVENT,
+        )
+        lifecycle = NormalizedEvent(
+            "task.started",
+            SESSION,
+            2,
+            "internal lifecycle",
+            EventOrigin.WORKER,
+            EvidenceKind.OBSERVED,
+        )
+        turns = project_message_turns((lifecycle, message))
+        self.assertEqual(len(turns), 1)
+        self.assertEqual(turns[0].speaker_id, "Researcher")
+        self.assertEqual(turns[0].source_event_ids, (EVENT,))
 
 
 if __name__ == "__main__":

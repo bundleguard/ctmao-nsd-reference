@@ -178,6 +178,34 @@ class ObservabilityTests(unittest.IsolatedAsyncioTestCase):
             "safe finding", "\n".join(e.to_json() for e in public.normalized_events)
         )
 
+    async def test_agent_message_requires_config_and_per_task_authorization(self) -> None:
+        task = TaskSpec(
+            "root",
+            children=(
+                TaskSpec(
+                    "public contribution",
+                    value="public message",
+                    publish_output=True,
+                    message_kind="analysis",
+                ),
+            ),
+        )
+        async with Orchestrator(("Researcher",)) as orchestrator:
+            private = await orchestrator.run({"Researcher": task})
+        self.assertNotIn(
+            "message.sent", [event.event_type for event in private.normalized_events]
+        )
+
+        config = RuntimeConfig(publish_agent_messages=True)
+        async with Orchestrator(("Researcher",), config) as orchestrator:
+            public = await orchestrator.run({"Researcher": task})
+        message = next(
+            event for event in public.normalized_events if event.event_type == "message.sent"
+        )
+        self.assertIn("public message", message.summary)
+        self.assertEqual(dict(message.attributes)["speaker_id"], "Researcher")
+        self.assertEqual(dict(message.attributes)["message_kind"], "analysis")
+
 
 class EventBusLifecycleTests(unittest.TestCase):
     def test_lower_priority_event_cannot_displace_critical_backlog(self) -> None:

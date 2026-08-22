@@ -51,9 +51,11 @@ Implement only facts backed by real instrumentation. A coherent first set is:
   `task.timed_out`, `task.rejected`;
 - `delegation.created`, `delegation.completed`, `delegation.failed`;
 - opt-in `finding.reported` for explicitly publishable task output;
+- double-opt-in `message.sent` for a successful, explicitly public runtime
+  output, with public speaker, recipient, and message-kind attributes;
 - `memory.snapshot.accepted`.
 
-Add `message.*`, `tool.*`, progress, blocked, waiting, or resumed events only
+Add other `message.*`, `tool.*`, progress, blocked, waiting, or resumed events only
 when a runtime explicitly exposes those facts.
 
 ## Ordering and causality

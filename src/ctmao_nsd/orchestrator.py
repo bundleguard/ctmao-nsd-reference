@@ -304,6 +304,7 @@ class Orchestrator:
                         parent_task_id=observation.parent_task_id,
                         agent_path=observation.agent_path,
                         status=observation.status,
+                        attributes=observation.attributes,
                         origin=EventOrigin.WORKER,
                         importance=importance,
                     )

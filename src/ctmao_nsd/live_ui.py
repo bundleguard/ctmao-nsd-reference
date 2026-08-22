@@ -10,19 +10,41 @@ from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 from uuid import UUID
+from typing import Protocol
 
-from .conference import ConferenceMode, project_briefing, project_conference_turns
+from .conference import (
+    ConferenceMode,
+    project_briefing,
+    project_conference_turns,
+    project_message_turns,
+)
+from .interactive_conference import ConferenceBusyError
 from .normalized_events import NormalizedEvent
 from .observability import EventBus, EventProjection
+from .dashboard_v3 import DASHBOARD_HTML as _DASHBOARD_HTML
+
+
+class ConferenceControl(Protocol):
+    """Synchronous boundary exposed to the loopback HTTP control plane."""
+
+    def start(self, objective: str) -> object: ...
+    def cancel(self) -> object: ...
+    def snapshot(self) -> object: ...
 
 
 class LiveDashboard:
     """Serve a bounded live execution view without entering the runtime core."""
 
-    def __init__(self, event_bus: EventBus, host: str = "127.0.0.1") -> None:
+    def __init__(
+        self,
+        event_bus: EventBus,
+        host: str = "127.0.0.1",
+        control: ConferenceControl | None = None,
+    ) -> None:
         if host not in ("127.0.0.1", "localhost"):
             raise ValueError("the V1 dashboard is loopback-only")
         self.event_bus = event_bus
+        self.control = control
         self.projection = EventProjection()
         self.token = secrets.token_urlsafe(24)
         self._condition = threading.Condition()
@@ -81,6 +103,7 @@ class LiveDashboard:
                 self._run_events.pop(next(iter(self._run_events)))
             self._run_events.setdefault(event.run_id, []).append(event)
         turns = project_conference_turns((event,), mode=ConferenceMode.TEXT)
+        messages = project_message_turns((event,))
         briefings = (
             project_briefing(self._run_events.get(event.run_id, ()))
             if event.event_type.startswith("orchestration.run.")
@@ -89,6 +112,7 @@ class LiveDashboard:
         payload = {
             "event": event.to_dict(),
             "turns": [_turn_dict(turn) for turn in turns],
+            "messages": [_message_dict(turn, event) for turn in messages],
             "briefings": [_turn_dict(turn) for turn in briefings],
         }
         encoded = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
@@ -105,7 +129,7 @@ class LiveDashboard:
         dashboard = self
 
         class Handler(BaseHTTPRequestHandler):
-            server_version = "CTMAOConference/0.2"
+            server_version = "CTMAOConference/0.3"
 
             def do_GET(self) -> None:  # noqa: N802 - stdlib callback spelling
                 parsed = urlparse(self.path)
@@ -120,13 +144,102 @@ class LiveDashboard:
                     self.send_error(HTTPStatus.FORBIDDEN)
                     return
                 if parsed.path == "/":
-                    self._send_bytes("text/html; charset=utf-8", _DASHBOARD_HTML)
+                    page = (
+                        _LEGACY_DASHBOARD_HTML
+                        if query.get("view", [None])[0] == "legacy"
+                        else _DASHBOARD_HTML
+                    )
+                    self._send_bytes("text/html; charset=utf-8", page)
                 elif parsed.path == "/api/state":
-                    self._send_json(_snapshot_dict(dashboard.projection.snapshot()))
+                    state = _snapshot_dict(dashboard.projection.snapshot())
+                    state["conference"] = (
+                        dict(dashboard.control.snapshot())
+                        if dashboard.control is not None
+                        else None
+                    )
+                    self._send_json(state)
                 elif parsed.path == "/events":
                     self._stream_events()
                 else:
                     self.send_error(HTTPStatus.NOT_FOUND)
+
+            def do_POST(self) -> None:  # noqa: N802 - stdlib callback spelling
+                parsed = urlparse(self.path)
+                query = parse_qs(parsed.query)
+                if query.get("token", [None])[0] != dashboard.token:
+                    self._discard_request_body()
+                    self._send_json({"error": "forbidden"}, HTTPStatus.FORBIDDEN)
+                    return
+                if not self._host_allowed() or not self._origin_allowed():
+                    self._discard_request_body()
+                    self._send_json({"error": "forbidden"}, HTTPStatus.FORBIDDEN)
+                    return
+                if dashboard.control is None:
+                    self._send_json(
+                        {"error": "interactive control is unavailable"},
+                        HTTPStatus.NOT_IMPLEMENTED,
+                    )
+                    return
+                if parsed.path == "/api/runs":
+                    try:
+                        body = self._read_json()
+                        objective = body.get("objective")
+                        if not isinstance(objective, str):
+                            raise ValueError("objective must be a string")
+                        state = dashboard.control.start(objective)
+                    except ConferenceBusyError as exc:
+                        self._send_json({"error": str(exc)}, HTTPStatus.CONFLICT)
+                        return
+                    except ValueError as exc:
+                        self._send_json({"error": str(exc)}, HTTPStatus.BAD_REQUEST)
+                        return
+                    self._send_json(dict(state), HTTPStatus.ACCEPTED)
+                    return
+                if parsed.path == "/api/runs/cancel":
+                    self._send_json(dict(dashboard.control.cancel()), HTTPStatus.ACCEPTED)
+                    return
+                self._send_json({"error": "not found"}, HTTPStatus.NOT_FOUND)
+
+            def _discard_request_body(self) -> None:
+                try:
+                    length = int(self.headers.get("Content-Length", "0"))
+                except ValueError:
+                    return
+                if 0 < length <= 8192:
+                    self.rfile.read(length)
+
+            def _read_json(self) -> dict[str, object]:
+                if not self.headers.get("Content-Type", "").lower().startswith(
+                    "application/json"
+                ):
+                    raise ValueError("Content-Type must be application/json")
+                try:
+                    length = int(self.headers.get("Content-Length", "0"))
+                except ValueError:
+                    raise ValueError("invalid Content-Length") from None
+                if not 1 <= length <= 8192:
+                    raise ValueError("request body must contain 1 to 8192 bytes")
+                try:
+                    def pairs(items: list[tuple[str, object]]) -> dict[str, object]:
+                        value: dict[str, object] = {}
+                        for key, item in items:
+                            if key in value:
+                                raise ValueError("duplicate JSON key")
+                            value[key] = item
+                        return value
+
+                    value = json.loads(
+                        self.rfile.read(length).decode("utf-8", "strict"),
+                        object_pairs_hook=pairs,
+                        parse_constant=lambda _: (_ for _ in ()).throw(
+                            ValueError("non-finite JSON number")
+                        ),
+                    )
+                except (UnicodeDecodeError, json.JSONDecodeError, ValueError):
+                    raise ValueError("request body must be valid UTF-8 JSON") from None
+                if not isinstance(value, dict):
+                    raise ValueError("request body must be a JSON object")
+                return value
 
             def _host_allowed(self) -> bool:
                 request_host = self.headers.get("Host", "")
@@ -140,8 +253,13 @@ class LiveDashboard:
                 host, port = dashboard._server.server_address[:2]
                 return origin == f"http://{host}:{port}"
 
-            def _headers(self, content_type: str, length: int | None = None) -> None:
-                self.send_response(HTTPStatus.OK)
+            def _headers(
+                self,
+                content_type: str,
+                length: int | None = None,
+                status: HTTPStatus = HTTPStatus.OK,
+            ) -> None:
+                self.send_response(status)
                 self.send_header("Content-Type", content_type)
                 self.send_header("Cache-Control", "no-store")
                 self.send_header("X-Content-Type-Options", "nosniff")
@@ -158,11 +276,14 @@ class LiveDashboard:
                 self._headers(content_type, len(encoded))
                 self.wfile.write(encoded)
 
-            def _send_json(self, value: object) -> None:
-                self._send_bytes(
-                    "application/json; charset=utf-8",
-                    json.dumps(value, ensure_ascii=False, separators=(",", ":")),
-                )
+            def _send_json(
+                self, value: object, status: HTTPStatus = HTTPStatus.OK
+            ) -> None:
+                encoded = json.dumps(
+                    value, ensure_ascii=False, separators=(",", ":")
+                ).encode("utf-8")
+                self._headers("application/json; charset=utf-8", len(encoded), status)
+                self.wfile.write(encoded)
 
             def _stream_events(self) -> None:
                 self._headers("text/event-stream; charset=utf-8")
@@ -224,7 +345,15 @@ def _turn_dict(turn: object) -> dict[str, object]:
     }
 
 
-_DASHBOARD_HTML = r"""<!doctype html>
+def _message_dict(turn: object, event: NormalizedEvent) -> dict[str, object]:
+    value = _turn_dict(turn)
+    attributes = dict(event.attributes)
+    value["recipient_id"] = attributes.get("recipient_id", "conference")
+    value["message_kind"] = attributes.get("message_kind", "statement")
+    return value
+
+
+_LEGACY_DASHBOARD_HTML = r"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>CTMAO-NSD Live Agent Conference</title><style>
 :root{color-scheme:dark;--bg:#08111d;--panel:#111f30;--ink:#eef6ff;--muted:#9db0c5;--cyan:#51d5d9;--gold:#f4bf60}

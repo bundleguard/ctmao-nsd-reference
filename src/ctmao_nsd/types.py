@@ -46,6 +46,9 @@ class TaskSpec:
     duration: float = 0.0
     should_fail: bool = False
     task_id: UUID = field(default_factory=uuid4)
+    publish_output: bool = False
+    message_kind: str = "statement"
+    recipient_id: str = "conference"
 
     def __post_init__(self) -> None:
         """Validate input at the boundary before it reaches a worker."""
@@ -53,6 +56,12 @@ class TaskSpec:
             raise ValueError("task name must not be blank")
         if self.duration < 0:
             raise ValueError("task duration must not be negative")
+        if not isinstance(self.publish_output, bool):
+            raise ValueError("publish_output must be a boolean")
+        if not self.message_kind.strip() or len(self.message_kind) > 64:
+            raise ValueError("message_kind must be a bounded non-blank string")
+        if not self.recipient_id.strip() or len(self.recipient_id) > 256:
+            raise ValueError("recipient_id must be a bounded non-blank string")
 
 
 @dataclass(frozen=True, slots=True)
@@ -103,6 +112,7 @@ class WorkerObservation:
     agent_path: tuple[str, ...] = ()
     status: str | None = None
     importance: str = "normal"
+    attributes: tuple[tuple[str, Scalar], ...] = ()
 
 
 @dataclass(frozen=True, slots=True)

@@ -6,11 +6,10 @@ pattern and reference runtime. It combines isolated, thread-owned executors
 with bounded hierarchical task execution and orchestrator-mediated state
 exchange.
 
-> **Scope of v0.2.0:** the default agents remain deterministic Python executors
-> with caller-declared task trees. This release adds normalized observability,
-> a local conference UI, provider-neutral speech and model-runtime contracts,
-> and host-fed Codex adapter prototypes. It does not bundle an LLM provider,
-> autonomous planning, dynamic task decomposition, or model-token budgeting.
+> **Scope of v0.3.0:** the default runtime remains deterministic and task trees
+> remain caller-declared. This release adds an interactive local conference,
+> explicit public agent messages, and an optional OpenAI Responses API provider.
+> Models cannot plan delegation, execute tools, or bypass runtime limits.
 
 This standard-library-only implementation is intended for concurrency research,
 experiments, and teaching. Its deterministic runtime demonstrates a control
@@ -249,6 +248,33 @@ Normalized events are available in `OrchestrationReport.normalized_events` and
 through an optional failure-isolated `EventBus`. The legacy `events` report
 field remains available for v0.1 compatibility.
 
+## Interactive conference
+
+Start the offline interactive application:
+
+```bash
+python examples/interactive_conference.py
+```
+
+Open the printed tokenized loopback URL, enter an objective, and select **Start
+conference**. Researcher and Builder contribute concurrently; Reviewer receives
+their actual public outputs; Moderator receives all three messages and produces
+the final decision. The deterministic demo is clearly labeled and performs no
+model or network call.
+
+For a real model-backed conference, explicitly select the OpenAI provider:
+
+```powershell
+$env:OPENAI_API_KEY = "your API key"
+python examples/interactive_conference.py --provider openai --model gpt-5.4
+```
+
+This sends the objective and public participant messages to the
+[OpenAI Responses API](https://developers.openai.com/api/reference/resources/responses/methods/create).
+The key remains in the host process and is not copied into events. Requests use
+`store: false`; provider and account retention policy still applies. API use may
+incur charges. Never paste an API key into the conference task box.
+
 ## Agent runtime boundary
 
 `DeterministicRuntime` remains the default. `ModelBackedRuntime` defines an
@@ -305,10 +331,9 @@ main.py         Original deterministic two-worker demonstration
 ## Trade-offs and limitations
 
 - Python threads do not provide process or security isolation.
-- v0.2.0 bundles no model provider or credentials and performs no model call by
-  default. Its optional `ModelBackedRuntime` invokes only an
-  application-supplied provider. Autonomous planning, provider-managed tools,
-  and model-token budget enforcement are not implemented.
+- v0.3.0 performs no model call by default. The optional OpenAI provider requires
+  explicit launch selection and a host-supplied credential. Autonomous planning,
+  provider-managed tools, and model-token budget enforcement are not implemented.
 - Task trees are caller-declared; supervisors do not dynamically create or
   select work.
 - `SyncToken` is a single-use memory-synchronization capability. It is unrelated

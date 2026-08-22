@@ -175,6 +175,17 @@ def project_conference_turns(
     return tuple(projected)
 
 
+def project_message_turns(
+    events: Iterable[NormalizedEvent],
+) -> tuple[ConferenceTurn, ...]:
+    """Project only genuine public agent messages for the human conference."""
+    return project_conference_turns(
+        (event for event in events if event.event_type == "message.sent"),
+        mode=ConferenceMode.TEXT,
+        verbosity=Verbosity.NORMAL,
+    )
+
+
 def project_briefing(events: Iterable[NormalizedEvent]) -> tuple[ConferenceTurn, ...]:
     """Create one deterministic source-backed run briefing from terminal evidence."""
     unique = {event.event_id: event for event in events}
@@ -254,6 +265,10 @@ def _include_event(event_type: str, verbosity: Verbosity) -> bool:
 
 
 def _speaker_for(event: NormalizedEvent) -> str:
+    if event.event_type == "message.sent":
+        speaker_id = dict(event.attributes).get("speaker_id")
+        if isinstance(speaker_id, str) and speaker_id.strip():
+            return speaker_id
     if event.origin in (EventOrigin.ORCHESTRATOR, EventOrigin.PROJECTION):
         return "orchestrator"
     if event.agent_path:

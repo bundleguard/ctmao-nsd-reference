@@ -21,6 +21,7 @@ from .conference import (
     assign_voices,
     project_briefing,
     project_conference_turns,
+    project_message_turns,
 )
 from .speech import AsyncSpeakerQueue, NullSpeechProvider
 from .agent_runtime import (
@@ -38,6 +39,13 @@ from .external_adapter import (
     CodexThreadSnapshotAdapter,
     ExternalRuntimeAdapter,
 )
+from .interactive_conference import (
+    ConferenceBusyError,
+    DemoConferenceProvider,
+    InteractiveConference,
+    Participant,
+)
+from .openai_provider import OpenAIProviderError, OpenAIResponsesProvider
 
 __all__ = [
     "OrchestrationReport",
@@ -49,6 +57,7 @@ __all__ = [
     "AsyncSpeakerQueue",
     "AgentRuntime",
     "AdapterResult",
+    "ConferenceBusyError",
     "ConferenceMode",
     "ConferenceTurn",
     "CodexThreadSnapshotAdapter",
@@ -57,12 +66,17 @@ __all__ = [
     "EventProjection",
     "ExternalRuntimeAdapter",
     "DeterministicRuntime",
+    "DemoConferenceProvider",
+    "InteractiveConference",
     "ModelBackedRuntime",
     "ModelProvider",
     "ModelRequest",
     "ModelResponse",
     "NormalizedEvent",
     "NullSpeechProvider",
+    "OpenAIProviderError",
+    "OpenAIResponsesProvider",
+    "Participant",
     "ResultStatus",
     "RuntimeRequest",
     "RuntimeConfig",
@@ -74,6 +88,7 @@ __all__ = [
     "assign_voices",
     "project_briefing",
     "project_conference_turns",
+    "project_message_turns",
 ]
 
-__version__ = "0.2.0"
+__version__ = "0.3.0"
