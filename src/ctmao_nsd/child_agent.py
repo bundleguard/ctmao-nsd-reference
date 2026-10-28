@@ -207,6 +207,7 @@ class ChildAgent(Agent):
                         ("recipient_id", task.recipient_id),
                         ("message_kind", task.message_kind),
                     ),
+                    upstream_event_ids=task.upstream_event_ids,
                 )
             )
         event_type = "task.completed" if result.succeeded else f"task.{status.value}"

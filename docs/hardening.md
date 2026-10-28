@@ -1,12 +1,20 @@
-# CTMAO-NSD v0.3 Hardening Status
+# CTMAO-NSD v0.4 Hardening Status
 
-The v0.3 implementation is an experimental concurrency and conference
+The v0.4 implementation is an experimental concurrency and conference
 reference. Its core concurrency safety controls and interactive conference path
 are covered by the standard-library test suite. The deterministic runtime is
 the default; an application may supply a model provider through the optional
 runtime contract, but no provider or credentials are bundled.
 
 ## Resolved Controls
+
+### Plugin/Bridge Compatibility Handshake
+
+The repository-contained Agent Conference plugin and host-fed bridge declare
+protocol `1.1` at launch and on every event command. The private session file
+retains the accepted bridge version, and mismatches fail before participant or
+message facts are submitted. This prevents a stale plugin from silently
+omitting the causal receipts required by Reviewer and Moderator.
 
 ### Single Correlation Dispatcher
 
@@ -42,6 +50,14 @@ Workers retain the active command correlation at the fatal boundary. Failed and
 stopped workers reject later commands with `WorkerUnavailableError`; lifecycle
 events come from actual worker envelopes rather than optimistic shutdown claims.
 
+### Fail-Closed Conference Provenance
+
+Public conference messages require a same-participant accepted task-lifecycle
+cause and role-correct prior message inputs. Native causal references are
+validated by the central event authority. The dashboard resolves a bounded full
+evidence graph and suppresses any utterance whose graph is incomplete or
+inconsistent; bridge and presentation registries are explicitly bounded.
+
 ## Supported Usage Contract
 
 - Use one public `run()` call at a time per orchestrator instance.
@@ -66,6 +82,11 @@ events come from actual worker envelopes rather than optimistic shutdown claims.
 - Codex adapters are host-fed prototypes for currently observed records. They
   do not launch Codex, connect to desktop task storage, or guarantee a
   version-stable external schema.
+- The Codex conference bridge is also host-fed. It presents only explicit
+  public results supplied by the invoking Codex skill; it cannot transparently
+  attach to an arbitrary pre-existing desktop task. Its source-reference digest
+  proves stable association inside the host workflow, not independent
+  attestation of a source record's contents.
 - The event bus, dashboard replay, transcripts, and adapter replay state are
   in-memory and non-durable.
 - Complete task trees are caller-declared rather than dynamically planned by a
@@ -74,3 +95,11 @@ events come from actual worker envelopes rather than optimistic shutdown claims.
   budgets.
 
 These are explicit scope limits, not untracked correctness failures.
+
+### Interactive Conference Cancellation Cleanup
+
+Closing an interactive conference drains its run coroutine before stopping the
+control loop. A cancelled cross-thread Future can become terminal before the
+orchestrator has joined its workers; shutdown must not cancel that cleanup a
+second time. Regression coverage checks that cancellation followed by close
+leaves no conference control or worker threads alive.

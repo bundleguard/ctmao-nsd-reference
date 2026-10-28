@@ -43,6 +43,24 @@ authorized host. This is useful inside a host that already has a supported task
 read capability, but the adapter owns no such connection. A `codex://` link is
 only a user-facing locator and is not treated as a public API endpoint.
 
+`CodexConferenceBridge` is the higher-fidelity presentation path used by the
+repository-contained Agent Conference skill. The host explicitly reports
+participant lifecycle and public final messages using genuine Codex
+subagent/thread references. The bridge stores only a source-reference digest,
+validates fixed roles, states, message kinds, and sizes, redacts message text,
+and publishes normalized observed events. It remains host-fed: the bridge does
+not discover task activity and does not independently verify a claimed host
+reference.
+
+Plugin release `0.4.2` and the bridge use protocol `1.1`. The plugin declares
+that version at launch and on every event command; the bridge records it in the
+private session file and public state. Missing or mismatched versions fail
+closed before host facts are accepted. This compatibility handshake does not
+turn a source-reference digest into independent attestation.
+Event clients also send `X-CTMAO-Bridge-Protocol: 1.1`; the Codex bridge HTTP
+boundary rejects a missing or mismatched header with an explicit HTTP 409
+compatibility error. Clients validate the response version as well.
+
 Codex app-server is the richer future route because its documented item model
 includes `collabToolCall` records with sender/receiver/new-thread identifiers.
 As of this decision, the CLI classifies app-server as experimental and intended

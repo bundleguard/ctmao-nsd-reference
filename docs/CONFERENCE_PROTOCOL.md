@@ -48,9 +48,59 @@ stable public speaker, recipient, and message kind. Later conference rounds
 receive earlier public output strings as actual inputs; the system does not
 invent replies from lifecycle events.
 
+Those inputs retain their accepted `message.sent` event IDs as bounded
+`source_event_ids` provenance. Researcher and Builder are independent inputs to
+Reviewer; Reviewer is therefore a fork/join rather than a fabricated linear
+handoff. Each public message is directly caused by its own accepted
+`task.started` fact and remains grouped by the worker-command correlation ID.
+Moderator cites all supplied public inputs while its direct operational cause
+remains its own task lifecycle.
+
+The four-role protocol has a fixed evidence policy. Researcher and Builder cite
+no upstream messages. Reviewer cites exactly every available successful
+Researcher and Builder message, with at least one required. Moderator cites
+exactly those available initial messages and the Reviewer message when one was
+published. A host-fed message is rejected unless its direct cause is that same
+participant's accepted `task.started` event.
+Each participant has one forward-only lifecycle and may publish at most one
+public message per conference; contributed, failed, and finished identities
+cannot be reopened or assigned a replacement `task.started` event.
+
+Before a public message reaches transcript or speech, the dashboard resolves
+its complete direct-cause and upstream graph from the active conference event
+registry. A missing, cross-session, non-prior, mismatched, cyclic, or oversized
+graph suppresses the utterance. The provenance disclosure lists each resolved
+event. Resolution is bounded to 64 events per utterance; active dashboard
+evidence is bounded to 512 events, and the Codex bridge admits at most 256
+events while reserving its final slot for a terminal fact.
+Presentation-bound structured fields such as recipient identity pass through
+the same fail-closed redaction boundary as utterance text.
+
 Start, completion, delegation, memory, and worker events remain available in the
 technical log. They are not rendered as conversational speech in the primary
 view. The legacy v0.2 projection remains available for diagnostics.
+
+## Codex task conference
+
+The v0.4 Codex bridge is populated only by the authorized host workflow that
+owns the current Codex task. Its four presentation identities are Researcher,
+Builder, Reviewer, and Moderator; those labels describe bounded conference
+roles and do not replace the genuine Codex subagent/thread identifiers retained
+as digested source references.
+
+Starting a new conference creates a new run identity and clears prior replay,
+projection, transcript, speaking, and task-tree state. Participant state is
+run-scoped. One failed participant produces a sanitized warning and may degrade
+to the remaining evidence; it must not produce invented dialogue or stale
+output. Completion, failure, and cancellation clear the current speaker and
+invalidate queued speech.
+
+In Codex mode the browser task composer is hidden. The originating Codex task is
+the steering and final-answer surface; the dashboard is a live public record.
+The fixed Researcher/Builder-to-Reviewer-to-Moderator diagram describes the
+protocol, not worker-to-worker communication or global execution order. A
+connection is presented as accepted only when the downstream public message
+cites the exact accepted upstream `message.sent` event IDs.
 
 ## Speaker and voice identity
 

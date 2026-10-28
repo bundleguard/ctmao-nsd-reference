@@ -49,6 +49,7 @@ class TaskSpec:
     publish_output: bool = False
     message_kind: str = "statement"
     recipient_id: str = "conference"
+    upstream_event_ids: tuple[UUID, ...] = ()
 
     def __post_init__(self) -> None:
         """Validate input at the boundary before it reaches a worker."""
@@ -62,6 +63,12 @@ class TaskSpec:
             raise ValueError("message_kind must be a bounded non-blank string")
         if not self.recipient_id.strip() or len(self.recipient_id) > 256:
             raise ValueError("recipient_id must be a bounded non-blank string")
+        if len(self.upstream_event_ids) > 16:
+            raise ValueError("upstream_event_ids cannot contain more than 16 entries")
+        if any(not isinstance(item, UUID) for item in self.upstream_event_ids):
+            raise TypeError("upstream_event_ids must contain UUID values")
+        if len(self.upstream_event_ids) != len(set(self.upstream_event_ids)):
+            raise ValueError("upstream_event_ids must not contain duplicates")
 
 
 @dataclass(frozen=True, slots=True)
@@ -113,6 +120,7 @@ class WorkerObservation:
     status: str | None = None
     importance: str = "normal"
     attributes: tuple[tuple[str, Scalar], ...] = ()
+    upstream_event_ids: tuple[UUID, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)

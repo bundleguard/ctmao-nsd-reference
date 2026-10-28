@@ -5,7 +5,7 @@ Multi-Agent Orchestration with Nested Sub-Agent Delegation (CTMAO-NSD)**.
 
 ## Runtime terminology
 
-In v0.3.0, `SupervisorAgent` and `ChildAgent` use `DeterministicRuntime` by
+In v0.4.0, `SupervisorAgent` and `ChildAgent` use `DeterministicRuntime` by
 default. An application may inject `ModelBackedRuntime`, but the model provider
 executes only the current node: it cannot plan, alter the immutable `TaskSpec`
 tree, or invent delegation. The runtime enforces how the caller-supplied tree
@@ -97,3 +97,35 @@ The token-protected HTTP control plane schedules work through
 `InteractiveConference`; it does not consume result envelopes. Token, Host, and
 Origin validation protect every state-changing route, and only one conference
 is admitted at a time.
+
+## Codex host-fed conference bridge
+
+`CodexConferenceBridge` is a separate application boundary for a conference
+that originates in the current Codex task. The Codex skill owns genuine
+subagent delegation; the bridge owns only validated public presentation facts.
+It neither launches Codex nor reads task storage, credentials, prompts, tool
+arguments, or private reasoning.
+
+The trusted host starts one conference and posts bounded participant states,
+explicit public messages, and one terminal result over token-authenticated
+loopback routes. Every accepted fact becomes an `ADAPTER`-origin normalized
+event. Raw source references are replaced with bounded SHA-256 digests before
+projection. Redaction is fail-closed before public message publication.
+
+`LiveDashboard` scopes replay and projection to the active conference ID. A new
+conference clears prior messages, projected events, task-tree state, and stale
+speech. Terminal state invalidates the current speaker. The UI remains
+downstream: bridge, presentation, speech, or browser failure cannot fail the
+originating Codex task.
+
+The bridge applies the fixed Researcher/Builder fork, Reviewer join, and
+Moderator synthesis evidence policy before accepting a public message. The
+dashboard retains a bounded active-conference event registry across the native
+interactive conference's internal runs and resolves each utterance's complete
+causal graph fail-closed before presentation.
+
+Plugin/bridge protocol `1.1` is a host-command compatibility boundary distinct
+from normalized-event schema `1.0`. The evidence-first dashboard remains a
+downstream projection: its accepted workflow edges are derived only from the
+already validated upstream message IDs and never consume worker envelopes or
+alter orchestration.
