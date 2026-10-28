@@ -217,6 +217,12 @@ class InteractiveConferenceTests(unittest.TestCase):
             release.set()
             conference.close()
             bus.close()
+        self.assertFalse(conference._thread.is_alive())
+        self.assertEqual(
+            [t.name for t in threading.enumerate() if t.name.startswith("ctmao-worker-")],
+            [],
+            "cancelled conference must drain its workers before close returns",
+        )
 
 
 if __name__ == "__main__":

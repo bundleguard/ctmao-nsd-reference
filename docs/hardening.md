@@ -95,3 +95,11 @@ inconsistent; bridge and presentation registries are explicitly bounded.
   budgets.
 
 These are explicit scope limits, not untracked correctness failures.
+
+### Interactive Conference Cancellation Cleanup
+
+Closing an interactive conference drains its run coroutine before stopping the
+control loop. A cancelled cross-thread Future can become terminal before the
+orchestrator has joined its workers; shutdown must not cancel that cleanup a
+second time. Regression coverage checks that cancellation followed by close
+leaves no conference control or worker threads alive.

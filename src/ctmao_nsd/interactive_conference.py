@@ -110,6 +110,7 @@ class InteractiveConference:
             item.participant_id: "waiting" for item in participants
         }
         self._future: Future[None] | None = None
+        self._run_task: asyncio.Task[None] | None = None
         self._closed = False
         self._loop_ready = threading.Event()
         self._thread = threading.Thread(
@@ -201,10 +202,22 @@ class InteractiveConference:
                 return
             self._closed = True
             future = self._future
-            if future is not None and self._status in {"queued", "running", "cancelling"}:
+            if future is not None and self._status in {"queued", "running"}:
                 future.cancel()
-        self._loop.call_soon_threadsafe(self._loop.stop)
+        # Cancelling the concurrent Future reports cancellation before the
+        # coroutine has finished its async context-manager cleanup. Drain that
+        # cleanup before stopping the loop; a second cancellation can interrupt
+        # Orchestrator.close() and leave non-daemon workers alive.
+        shutdown = asyncio.run_coroutine_threadsafe(self._drain_run(), self._loop)
+        shutdown.add_done_callback(
+            lambda _: self._loop.call_soon_threadsafe(self._loop.stop)
+        )
         self._thread.join(timeout=2.0)
+
+    async def _drain_run(self) -> None:
+        task = self._run_task
+        if task is not None:
+            await asyncio.gather(task, return_exceptions=True)
 
     def _loop_main(self) -> None:
         self._loop = asyncio.new_event_loop()
@@ -231,6 +244,7 @@ class InteractiveConference:
                     self._condition.notify_all()
 
     async def _run(self, conference_id: UUID, objective: str) -> None:
+        self._run_task = asyncio.current_task()
         with self._condition:
             if self._status in {"cancelling", "cancelled"}:
                 return
