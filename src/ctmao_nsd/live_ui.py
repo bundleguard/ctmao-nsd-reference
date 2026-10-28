@@ -21,7 +21,19 @@ from .conference import (
 from .interactive_conference import ConferenceBusyError
 from .normalized_events import NormalizedEvent
 from .observability import EventBus, EventProjection
-from .dashboard_v3 import DASHBOARD_HTML as _DASHBOARD_HTML
+from .dashboard_v3 import DASHBOARD_HTML as _DASHBOARD_V3_HTML
+from .dashboard_v4 import DASHBOARD_HTML as _DASHBOARD_V4_HTML
+from .dashboard_v5 import DASHBOARD_HTML as _DASHBOARD_HTML
+
+
+_MAX_ACTIVE_EVENTS = 512
+_MAX_PROVENANCE_EVENTS = 64
+_CONFERENCE_UPSTREAM_ROLES = {
+    "Researcher": (),
+    "Builder": (),
+    "Reviewer": ("Researcher", "Builder"),
+    "Moderator": ("Researcher", "Builder", "Reviewer"),
+}
 
 
 class ConferenceControl(Protocol):
@@ -50,7 +62,9 @@ class LiveDashboard:
         self._condition = threading.Condition()
         self._messages: deque[tuple[int, str]] = deque(maxlen=512)
         self._delivery_sequence = 0
+        self._active_conference_id: str | None = None
         self._run_events: dict[UUID, list[NormalizedEvent]] = {}
+        self._active_events: dict[UUID, NormalizedEvent] = {}
         self._closed = False
         self._started = False
         self._listener_connected = threading.Event()
@@ -93,6 +107,39 @@ class LiveDashboard:
             self._thread.join(timeout=1.0)
 
     def _accept_event(self, event: NormalizedEvent) -> None:
+        conference_id = str(event.run_id) if event.run_id else None
+        control_mode: object = None
+        if self.control is not None:
+            try:
+                snapshot = dict(self.control.snapshot())
+                control_mode = snapshot.get("mode")
+                conference_id = snapshot.get("conference_id") or conference_id
+            except Exception:
+                pass
+        # The Codex bridge uses the conference ID as every event's run ID.
+        # Reject a delayed event from a previous bridge run before it can reset
+        # projection/transcript state for the active conference. Interactive
+        # conferences intentionally contain several internal orchestration run
+        # IDs, so this strict equality applies only to bridge mode.
+        if (
+            control_mode == "codex"
+            and conference_id
+            and event.run_id is not None
+            and str(event.run_id) != str(conference_id)
+        ):
+            return
+        with self._condition:
+            if conference_id and conference_id != self._active_conference_id:
+                self._active_conference_id = str(conference_id)
+                self._messages.clear()
+                self._run_events.clear()
+                self._active_events.clear()
+                self.projection = EventProjection()
+            if event.event_id not in self._active_events:
+                if len(self._active_events) >= _MAX_ACTIVE_EVENTS:
+                    self._active_events.pop(next(iter(self._active_events)))
+                self._active_events[event.event_id] = event
+            active_events = tuple(self._active_events.values())
         self.projection.apply(event)
         if event.run_id is not None:
             if (
@@ -110,10 +157,27 @@ class LiveDashboard:
             else ()
         )
         payload = {
+            "conference_id": conference_id,
             "event": event.to_dict(),
-            "turns": [_turn_dict(turn) for turn in turns],
-            "messages": [_message_dict(turn, event) for turn in messages],
-            "briefings": [_turn_dict(turn) for turn in briefings],
+            "turns": [
+                value
+                for turn in turns
+                if (value := _safe_turn_dict(turn, active_events)) is not None
+            ],
+            "messages": [
+                value
+                for turn in messages
+                if (value := _safe_message_dict(turn, event, active_events)) is not None
+            ],
+            "briefings": [
+                value
+                for turn in briefings
+                if (
+                    value := _safe_turn_dict(
+                        turn, self._run_events.get(event.run_id, ())
+                    )
+                ) is not None
+            ],
         }
         encoded = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
         with self._condition:
@@ -129,7 +193,7 @@ class LiveDashboard:
         dashboard = self
 
         class Handler(BaseHTTPRequestHandler):
-            server_version = "CTMAOConference/0.3"
+            server_version = "CTMAOConference/0.4"
 
             def do_GET(self) -> None:  # noqa: N802 - stdlib callback spelling
                 parsed = urlparse(self.path)
@@ -144,9 +208,14 @@ class LiveDashboard:
                     self.send_error(HTTPStatus.FORBIDDEN)
                     return
                 if parsed.path == "/":
+                    view = query.get("view", [None])[0]
                     page = (
                         _LEGACY_DASHBOARD_HTML
-                        if query.get("view", [None])[0] == "legacy"
+                        if view == "legacy"
+                        else _DASHBOARD_V3_HTML
+                        if view == "v3"
+                        else _DASHBOARD_V4_HTML
+                        if view == "v4"
                         else _DASHBOARD_HTML
                     )
                     self._send_bytes("text/html; charset=utf-8", page)
@@ -180,6 +249,22 @@ class LiveDashboard:
                         HTTPStatus.NOT_IMPLEMENTED,
                     )
                     return
+                if parsed.path.startswith("/api/bridge/"):
+                    expected_protocol = dict(dashboard.control.snapshot()).get(
+                        "bridge_protocol_version"
+                    )
+                    if expected_protocol is not None and self.headers.get(
+                        "X-CTMAO-Bridge-Protocol"
+                    ) != expected_protocol:
+                        self._discard_request_body()
+                        self._send_json(
+                            {
+                                "error": "Agent Conference plugin/bridge protocol is incompatible; reinstall the matching plugin and restart the conference",
+                                "bridge_protocol_version": expected_protocol,
+                            },
+                            HTTPStatus.CONFLICT,
+                        )
+                        return
                 if parsed.path == "/api/runs":
                     try:
                         body = self._read_json()
@@ -197,6 +282,77 @@ class LiveDashboard:
                     return
                 if parsed.path == "/api/runs/cancel":
                     self._send_json(dict(dashboard.control.cancel()), HTTPStatus.ACCEPTED)
+                    return
+                if parsed.path == "/api/bridge/messages":
+                    publish = getattr(dashboard.control, "publish_message", None)
+                    if publish is None:
+                        self._send_json(
+                            {"error": "Codex bridge messages are unavailable"},
+                            HTTPStatus.NOT_IMPLEMENTED,
+                        )
+                        return
+                    try:
+                        body = self._read_json()
+                        state = publish(
+                            _required_body_text(body, "participant_id", 64),
+                            _required_body_text(body, "text", 4096),
+                            message_kind=_required_body_text(body, "message_kind", 32),
+                            source_ref=_required_body_text(body, "source_ref", 512),
+                            recipient_id=_optional_body_text(
+                                body, "recipient_id", 256, "conference"
+                            ),
+                            causation_event_id=_optional_body_uuid(
+                                body, "causation_event_id"
+                            ),
+                            source_event_ids=_optional_body_uuid_list(
+                                body, "source_event_ids", 16
+                            ),
+                        )
+                    except ValueError as exc:
+                        self._send_json({"error": str(exc)}, HTTPStatus.BAD_REQUEST)
+                        return
+                    self._send_json(dict(state), HTTPStatus.ACCEPTED)
+                    return
+                if parsed.path == "/api/bridge/participants":
+                    update = getattr(dashboard.control, "update_participant", None)
+                    if update is None:
+                        self._send_json(
+                            {"error": "Codex bridge participant updates are unavailable"},
+                            HTTPStatus.NOT_IMPLEMENTED,
+                        )
+                        return
+                    try:
+                        body = self._read_json()
+                        state = update(
+                            _required_body_text(body, "participant_id", 64),
+                            _required_body_text(body, "state", 32),
+                            source_ref=_required_body_text(body, "source_ref", 512),
+                            detail=_optional_body_text(body, "detail", 512, None),
+                        )
+                    except ValueError as exc:
+                        self._send_json({"error": str(exc)}, HTTPStatus.BAD_REQUEST)
+                        return
+                    self._send_json(dict(state), HTTPStatus.ACCEPTED)
+                    return
+                if parsed.path == "/api/bridge/finish":
+                    finish = getattr(dashboard.control, "finish", None)
+                    if finish is None:
+                        self._send_json(
+                            {"error": "Codex bridge completion is unavailable"},
+                            HTTPStatus.NOT_IMPLEMENTED,
+                        )
+                        return
+                    try:
+                        body = self._read_json()
+                        state = finish(
+                            _optional_body_text(body, "status", 32, "completed"),
+                            source_ref=_required_body_text(body, "source_ref", 512),
+                            detail=_optional_body_text(body, "detail", 512, None),
+                        )
+                    except ValueError as exc:
+                        self._send_json({"error": str(exc)}, HTTPStatus.BAD_REQUEST)
+                        return
+                    self._send_json(dict(state), HTTPStatus.ACCEPTED)
                     return
                 self._send_json({"error": "not found"}, HTTPStatus.NOT_FOUND)
 
@@ -305,13 +461,67 @@ class LiveDashboard:
                             self.wfile.flush()
                         with dashboard._condition:
                             dashboard._condition.wait(timeout=5.0)
-                except (BrokenPipeError, ConnectionResetError):
+                except ConnectionError:
                     return
 
             def log_message(self, format: str, *args: object) -> None:
                 return
 
         return Handler
+
+
+def _required_body_text(
+    body: dict[str, object], field: str, maximum: int
+) -> str:
+    value = body.get(field)
+    if not isinstance(value, str) or not value.strip() or len(value) > maximum:
+        raise ValueError(f"{field} must be a bounded non-blank string")
+    return value.strip()
+
+
+def _optional_body_text(
+    body: dict[str, object],
+    field: str,
+    maximum: int,
+    default: str | None,
+) -> str | None:
+    value = body.get(field, default)
+    if value is None:
+        return None
+    if not isinstance(value, str) or not value.strip() or len(value) > maximum:
+        raise ValueError(f"{field} must be a bounded non-blank string")
+    return value.strip()
+
+
+def _optional_body_uuid(body: dict[str, object], field: str) -> UUID | None:
+    value = body.get(field)
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise ValueError(f"{field} must be a UUID string")
+    try:
+        return UUID(value)
+    except ValueError:
+        raise ValueError(f"{field} must be a UUID string") from None
+
+
+def _optional_body_uuid_list(
+    body: dict[str, object], field: str, maximum: int
+) -> tuple[UUID, ...]:
+    value = body.get(field, [])
+    if not isinstance(value, list) or len(value) > maximum:
+        raise ValueError(f"{field} must be a bounded UUID array")
+    parsed: list[UUID] = []
+    for item in value:
+        if not isinstance(item, str):
+            raise ValueError(f"{field} must be a bounded UUID array")
+        try:
+            event_id = UUID(item)
+        except ValueError:
+            raise ValueError(f"{field} must be a bounded UUID array") from None
+        if event_id not in parsed:
+            parsed.append(event_id)
+    return tuple(parsed)
 
 
 def _snapshot_dict(snapshot: object) -> dict[str, object]:
@@ -326,8 +536,34 @@ def _snapshot_dict(snapshot: object) -> dict[str, object]:
     }
 
 
-def _turn_dict(turn: object) -> dict[str, object]:
+def _turn_dict(
+    turn: object, source_events: tuple[NormalizedEvent, ...] = ()
+) -> dict[str, object]:
     """Serialize all provenance needed to audit a projected conference turn."""
+    evidence_events = _resolve_provenance_graph(turn, source_events)
+    evidence_records = [
+        {
+            "event_id": str(event.event_id),
+            "event_type": event.event_type,
+            "origin": event.origin.value,
+            "evidence": event.evidence.value,
+            "correlation_id": (
+                str(event.correlation_id) if event.correlation_id else None
+            ),
+            "causation_event_id": (
+                str(event.causation_event_id) if event.causation_event_id else None
+            ),
+            "source_event_ids": [
+                str(item) for item in _provenance_source_ids(event)
+            ],
+            "worker_id": event.worker_id,
+            "task_id": str(event.task_id) if event.task_id else None,
+            "agent_path": list(event.agent_path),
+            "provenance": dict(event.provenance),
+            "redactions": dict(event.redactions),
+        }
+        for event in evidence_events
+    ]
     return {
         "turn_id": turn.turn_id,
         "session_id": str(turn.session_id),
@@ -338,6 +574,7 @@ def _turn_dict(turn: object) -> dict[str, object]:
         "evidence": turn.evidence.value,
         "source_evidence": turn.source_evidence.value,
         "source_event_ids": [str(item) for item in turn.source_event_ids],
+        "source_evidence_records": evidence_records,
         "transformation_name": turn.transformation_name,
         "transformation_version": turn.transformation_version,
         "lifecycle_valid": turn.lifecycle_valid,
@@ -345,12 +582,132 @@ def _turn_dict(turn: object) -> dict[str, object]:
     }
 
 
-def _message_dict(turn: object, event: NormalizedEvent) -> dict[str, object]:
-    value = _turn_dict(turn)
+def _message_dict(
+    turn: object,
+    event: NormalizedEvent,
+    source_events: tuple[NormalizedEvent, ...],
+) -> dict[str, object]:
+    value = _turn_dict(turn, source_events)
     attributes = dict(event.attributes)
     value["recipient_id"] = attributes.get("recipient_id", "conference")
     value["message_kind"] = attributes.get("message_kind", "statement")
     return value
+
+
+def _safe_turn_dict(
+    turn: object, source_events: tuple[NormalizedEvent, ...]
+) -> dict[str, object] | None:
+    try:
+        return _turn_dict(turn, source_events)
+    except (AttributeError, TypeError, ValueError):
+        return None
+
+
+def _safe_message_dict(
+    turn: object,
+    event: NormalizedEvent,
+    source_events: tuple[NormalizedEvent, ...],
+) -> dict[str, object] | None:
+    try:
+        return _message_dict(turn, event, source_events)
+    except (AttributeError, TypeError, ValueError):
+        return None
+
+
+def _provenance_source_ids(event: NormalizedEvent) -> tuple[UUID, ...]:
+    raw = dict(event.provenance).get("source_event_ids")
+    if raw in (None, ""):
+        return ()
+    if not isinstance(raw, str):
+        raise ValueError("source_event_ids provenance must be UUID text")
+    values: list[UUID] = []
+    for item in raw.split(","):
+        try:
+            event_id = UUID(item)
+        except (AttributeError, ValueError):
+            raise ValueError("source_event_ids provenance contains an invalid UUID") from None
+        if event_id in values:
+            raise ValueError("source_event_ids provenance contains duplicates")
+        values.append(event_id)
+    if len(values) > 16:
+        raise ValueError("source_event_ids provenance exceeds the input bound")
+    return tuple(values)
+
+
+def _resolve_provenance_graph(
+    turn: object, source_events: tuple[NormalizedEvent, ...]
+) -> tuple[NormalizedEvent, ...]:
+    index = {event.event_id: event for event in source_events}
+    if len(index) != len(source_events):
+        raise ValueError("active provenance registry contains duplicate events")
+    pending = list(turn.source_event_ids)
+    resolved: list[NormalizedEvent] = []
+    seen: set[UUID] = set()
+    while pending:
+        event_id = pending.pop(0)
+        if event_id in seen:
+            continue
+        event = index.get(event_id)
+        if event is None or event.session_id != turn.session_id:
+            raise ValueError("conference turn evidence could not be fully resolved")
+        if len(resolved) >= _MAX_PROVENANCE_EVENTS:
+            raise ValueError("conference turn provenance graph exceeds its bound")
+        seen.add(event_id)
+        resolved.append(event)
+        upstream_ids = _provenance_source_ids(event)
+        dependency_ids = (
+            ((event.causation_event_id,) if event.causation_event_id else ())
+            + upstream_ids
+        )
+        for dependency_id in dependency_ids:
+            dependency = index.get(dependency_id)
+            if dependency is None or dependency.session_id != event.session_id:
+                raise ValueError("conference turn evidence contains a dangling link")
+            if dependency.sequence >= event.sequence:
+                raise ValueError("conference turn evidence is not causally prior")
+            pending.append(dependency_id)
+        if event.event_type == "message.sent":
+            _validate_public_message_event(event, upstream_ids, index)
+    return tuple(resolved)
+
+
+def _validate_public_message_event(
+    event: NormalizedEvent,
+    upstream_ids: tuple[UUID, ...],
+    index: dict[UUID, NormalizedEvent],
+) -> None:
+    if event.causation_event_id is None:
+        raise ValueError("public message lacks a direct lifecycle cause")
+    cause = index.get(event.causation_event_id)
+    if (
+        cause is None
+        or cause.event_type != "task.started"
+        or cause.worker_id != event.worker_id
+        or cause.correlation_id != event.correlation_id
+        or cause.task_id != event.task_id
+        or cause.agent_path != event.agent_path
+    ):
+        raise ValueError("public message cause does not match its task lifecycle")
+    speaker = dict(event.attributes).get("speaker_id")
+    expected_roles = _CONFERENCE_UPSTREAM_ROLES.get(speaker)
+    if expected_roles is None:
+        return
+    expected_ids = {
+        candidate.event_id
+        for candidate in index.values()
+        if candidate.event_type == "message.sent"
+        and candidate.sequence < event.sequence
+        and candidate.session_id == event.session_id
+        and dict(candidate.attributes).get("speaker_id") in expected_roles
+    }
+    if speaker == "Reviewer" and not expected_ids:
+        raise ValueError("Reviewer message lacks Researcher or Builder evidence")
+    if speaker == "Moderator" and not expected_ids:
+        raise ValueError("Moderator message lacks participant evidence")
+    if set(upstream_ids) != expected_ids:
+        raise ValueError("public message upstream evidence is incomplete")
+    if any(index[item].event_type != "message.sent" for item in upstream_ids):
+        raise ValueError("public message upstream evidence is not a message")
 
 
 _LEGACY_DASHBOARD_HTML = r"""<!doctype html>

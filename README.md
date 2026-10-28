@@ -6,10 +6,11 @@ pattern and reference runtime. It combines isolated, thread-owned executors
 with bounded hierarchical task execution and orchestrator-mediated state
 exchange.
 
-> **Scope of v0.3.0:** the default runtime remains deterministic and task trees
-> remain caller-declared. This release adds an interactive local conference,
-> explicit public agent messages, and an optional OpenAI Responses API provider.
-> Models cannot plan delegation, execute tools, or bypass runtime limits.
+> **Scope of v0.4.2:** the default runtime remains deterministic and task trees
+> remain caller-declared. This release adds a host-fed Codex conference bridge,
+> a packaged Codex skill, run-scoped presentation state, and a responsive
+> conference UI. Models cannot bypass runtime limits, and the bridge never reads
+> Codex storage or private reasoning.
 
 This standard-library-only implementation is intended for concurrency research,
 experiments, and teaching. Its deterministic runtime demonstrates a control
@@ -250,6 +251,15 @@ field remains available for v0.1 compatibility.
 
 ## Interactive conference
 
+The local dashboard uses an evidence-first layout: the source-backed public
+record and final decision are primary, while a compact workflow shows the fixed
+Researcher/Builder fork, Reviewer join, and all three cited inputs to Moderator.
+Connections become accepted only when the downstream public message cites the
+exact prior message events; they do not imply direct agent communication or
+execution order. Human-readable evidence and redaction status appear before raw
+technical identifiers.
+See [visual reference attribution](docs/third_party/synthetic-visuals-5.md).
+
 Start the offline interactive application:
 
 ```bash
@@ -274,6 +284,84 @@ This sends the objective and public participant messages to the
 The key remains in the host process and is not copied into events. Requests use
 `store: false`; provider and account retention policy still applies. API use may
 incur charges. Never paste an API key into the conference task box.
+
+## Conference a Codex task
+
+v0.4.2 includes a repository-contained Codex plugin at
+`plugins/agent-conference`. When the skill is installed and the user invokes
+`$agent-conference` or asks to conference the current task, the current Codex
+task remains authoritative while the local page follows genuine public results
+from bounded Codex subagents.
+
+The conference page is an observability surface, not a second task composer.
+The skill starts Researcher and Builder on independent bounded work, gives the
+Reviewer their actual results, and leaves the main Codex task responsible for
+moderation, integration, verification, and the final answer. Only explicit
+public final messages are published. Source references are stored as digests;
+private reasoning, prompts, raw tool arguments, credentials, and environment
+values are excluded.
+
+The plugin and bridge negotiate protocol `1.1`. A stale installed plugin fails
+with a reinstall instruction instead of silently producing an incomplete
+Reviewer or Moderator record. The plugin requires this CTMAO-NSD checkout; it
+is workflow glue for the repository bridge, not a standalone dashboard.
+
+### Install or update the Codex plugin
+
+The current development distribution is the personal marketplace plugin
+`agent-conference@personal`. Install it, or refresh an existing installation,
+from a terminal where the same personal marketplace is configured:
+
+```powershell
+codex plugin add agent-conference@personal --json
+```
+
+The returned JSON identifies the installed version; it must be `0.4.2` for this
+checkout. Start a new Codex task in this repository and invoke
+`$agent-conference`. The skill resolves the repository root, verifies
+`examples/codex_conference_bridge.py`, negotiates bridge protocol `1.1`, and
+prints an authenticated loopback dashboard URL. The dashboard process requires
+Python 3.11 or newer but does not require Docker.
+
+If Codex reports a plugin/bridge incompatibility, run the install command again,
+restart the conference, and confirm the task is attached to this repository.
+Do not open `tests/browser/dashboard.html` as the product UI; that file is only
+the synthetic regression runner.
+
+For bridge development or host integration, start it directly:
+
+```powershell
+$env:PYTHONPATH = "src"
+python examples/codex_conference_bridge.py serve `
+  --objective "Review the current Codex task" `
+  --plugin-protocol-version 1.1
+```
+
+The first JSON line contains the tokenized loopback URL and a private temporary
+session-file path. The included plugin scripts feed participant states, public
+messages, and the terminal result through authenticated loopback endpoints. The
+bridge intentionally does not launch a nested Codex process or attach to an
+arbitrary existing desktop task on its own.
+
+Audio is disabled initially. Enabling it is an explicit browser action, and the
+dashboard distinguishes the latest contribution, queued speech, actual speech,
+pause, mute, unavailability, and provider failure. Use `view=v4`, `view=v3`, or
+`view=legacy` to inspect earlier presentation revisions.
+
+To run the browser regressions on Windows, run
+`.\tests\run_browser_dashboard_smoke.ps1`, then open its printed loopback URL.
+The launcher resolves a real Python runtime, preserves an existing `PYTHONPATH`,
+and adds this checkout's `src` directory. On other platforms, set
+`PYTHONPATH=src` and run `python tests/browser_dashboard_smoke.py`.
+Do not open `tests/browser/dashboard.html` directly; it is served as part of the
+harness and cannot load the production dashboard over a `file://` URL.
+The harness runs the production dashboard at 1440px, 768px, and 360px with
+synthetic source records and controlled speech callbacks. It checks evidence
+links, responsive layout, accessible controls, speech lifecycle, partial
+failure, cancellation, reconnect, and new-run reset without model calls,
+audible playback, or additional dependencies. Refreshing the harness creates
+fresh dashboard frames. Real bridge transport and exact four-role receipts
+are covered separately by `test_plugin_http_client_four_role_handshake_receipts_and_finish`.
 
 ## Agent runtime boundary
 
@@ -307,10 +395,11 @@ snapshot supplied by an authorized host integration; it does not treat
 
 ```text
 src/ctmao_nsd/  Runtime, normalized events, observability, conference, speech,
-                local UI, model-runtime, and adapter modules
+                local UI, Codex bridge, model-runtime, and adapter modules
 tests/          Standard-library runtime, concurrency, privacy, UI, speech,
                 conference, and adapter tests
-examples/       Deterministic runtime, live conference, and Codex JSONL demos
+examples/       Deterministic runtime, live conference, and Codex bridge demos
+plugins/        Repository-contained Codex plugin and Agent Conference skill
 docs/           Architecture, protocols, operating guidance, and ADRs
 main.py         Original deterministic two-worker demonstration
 ```
@@ -331,7 +420,7 @@ main.py         Original deterministic two-worker demonstration
 ## Trade-offs and limitations
 
 - Python threads do not provide process or security isolation.
-- v0.3.0 performs no model call by default. The optional OpenAI provider requires
+- v0.4.0 performs no model call by default. The optional OpenAI provider requires
   explicit launch selection and a host-supplied credential. Autonomous planning,
   provider-managed tools, and model-token budget enforcement are not implemented.
 - Task trees are caller-declared; supervisors do not dynamically create or

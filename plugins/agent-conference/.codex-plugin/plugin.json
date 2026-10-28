@@ -1,0 +1,26 @@
+{
+  "name": "agent-conference",
+  "version": "0.4.2",
+  "description": "Establish a source-backed live conference for a Codex task using genuine Codex subagents.",
+  "author": {
+    "name": "BundleGuard",
+    "url": "https://github.com/bundleguard"
+  },
+  "repository": "https://github.com/bundleguard/ctmao-nsd-reference",
+  "license": "MIT",
+  "keywords": ["codex", "subagents", "conference", "observability", "voice"],
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "Agent Conference",
+    "shortDescription": "Source-backed agent review",
+    "longDescription": "Starts a loopback-only conference view, delegates bounded work to genuine Codex subagents, and publishes only explicit public results with provenance.",
+    "developerName": "BundleGuard",
+    "category": "Productivity",
+    "capabilities": ["Interactive"],
+    "defaultPrompt": [
+      "$agent-conference Establish a conference for this task.",
+      "$agent-conference Review this change with multiple agents.",
+      "$agent-conference Build this feature with researcher, builder, and reviewer roles."
+    ]
+  }
+}

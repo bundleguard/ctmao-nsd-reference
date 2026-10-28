@@ -206,6 +206,96 @@ class ObservabilityTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(dict(message.attributes)["speaker_id"], "Researcher")
         self.assertEqual(dict(message.attributes)["message_kind"], "analysis")
 
+    async def test_upstream_evidence_must_be_a_prior_session_public_message(self) -> None:
+        async with Orchestrator(("A",)) as orchestrator:
+            first = await orchestrator.run({"A": TaskSpec("first")})
+            lifecycle = next(
+                event
+                for event in first.normalized_events
+                if event.event_type == "task.started"
+            )
+            with self.assertRaisesRegex(ValueError, "must cite public messages"):
+                await orchestrator.run(
+                    {
+                        "A": TaskSpec(
+                            "invalid upstream",
+                            upstream_event_ids=(lifecycle.event_id,),
+                        )
+                    }
+                )
+
+        foreign_bus = EventBus()
+        try:
+            async with Orchestrator(("A",), event_bus=foreign_bus) as first_orchestrator:
+                foreign = await first_orchestrator.run({"A": TaskSpec("foreign")})
+            foreign_id = next(
+                event.event_id
+                for event in foreign.normalized_events
+                if event.event_type == "task.started"
+            )
+            async with Orchestrator(("A",)) as second_orchestrator:
+                with self.assertRaisesRegex(ValueError, "unknown upstream"):
+                    await second_orchestrator.run(
+                        {
+                            "A": TaskSpec(
+                                "cross session",
+                                upstream_event_ids=(foreign_id,),
+                            )
+                        }
+                    )
+        finally:
+            foreign_bus.close()
+
+    async def test_duplicate_task_ids_are_rejected_before_ambiguous_lifecycle(self) -> None:
+        duplicate_id = uuid4()
+        task = TaskSpec(
+            "root",
+            children=(
+                TaskSpec("first", task_id=duplicate_id),
+                TaskSpec("second", task_id=duplicate_id),
+            ),
+        )
+        async with Orchestrator(("A",)) as orchestrator:
+            with self.assertRaisesRegex(ValueError, "task IDs must be unique"):
+                await orchestrator.run({"A": task})
+
+    async def test_duplicate_task_ids_across_workers_are_rejected_before_scheduling(self) -> None:
+        duplicate_id = uuid4()
+        async with Orchestrator(("A", "B")) as orchestrator:
+            with self.assertRaisesRegex(ValueError, "unique across run assignments"):
+                await orchestrator.run(
+                    {
+                        "A": TaskSpec("worker A", task_id=duplicate_id),
+                        "B": TaskSpec("worker B", task_id=duplicate_id),
+                    }
+                )
+
+    async def test_all_upstream_evidence_is_preflighted_before_any_worker_submission(self) -> None:
+        unknown_event_id = uuid4()
+        orchestrator = Orchestrator(("A", "B"))
+        try:
+            with self.assertRaisesRegex(ValueError, "unknown upstream"):
+                await orchestrator.run(
+                    {
+                        "A": TaskSpec("valid first assignment", value="must not run"),
+                        "B": TaskSpec(
+                            "invalid second assignment",
+                            upstream_event_ids=(unknown_event_id,),
+                        ),
+                    }
+                )
+            recorded = tuple(
+                event
+                for events in orchestrator._normalized_by_run.values()
+                for event in events
+            )
+            self.assertNotIn("task.assigned", {event.event_type for event in recorded})
+            self.assertEqual(orchestrator._pending, {})
+            self.assertEqual(orchestrator.synchronized_memory("A"), {})
+            self.assertEqual(orchestrator.synchronized_memory("B"), {})
+        finally:
+            await orchestrator.close()
+
 
 class EventBusLifecycleTests(unittest.TestCase):
     def test_lower_priority_event_cannot_displace_critical_backlog(self) -> None:

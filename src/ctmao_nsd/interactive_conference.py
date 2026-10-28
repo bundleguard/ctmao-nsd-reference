@@ -12,9 +12,9 @@ from uuid import UUID, uuid4
 
 from .agent_runtime import ModelBackedRuntime, ModelProvider, ModelRequest, ModelResponse
 from .config import RuntimeConfig
-from .normalized_events import redact_text, utc_now_rfc3339
+from .normalized_events import NormalizedEvent, redact_text, utc_now_rfc3339
 from .observability import EventBus
-from .orchestrator import Orchestrator
+from .orchestrator import OrchestrationReport, Orchestrator
 from .types import TaskResult, TaskSpec
 
 
@@ -102,6 +102,13 @@ class InteractiveConference:
         self._started_at: str | None = None
         self._finished_at: str | None = None
         self._error: str | None = None
+        self._warning: str | None = None
+        self._objective: str | None = None
+        self._stage = "Waiting for an objective"
+        self._current_speaker: str | None = None
+        self._participant_states = {
+            item.participant_id: "waiting" for item in participants
+        }
         self._future: Future[None] | None = None
         self._closed = False
         self._loop_ready = threading.Event()
@@ -117,6 +124,7 @@ class InteractiveConference:
         objective = objective.strip()
         if not objective or len(objective) > 4000:
             raise ValueError("objective must contain between 1 and 4000 characters")
+        safe_objective, _ = redact_text(objective, max_length=4000)
         with self._condition:
             if self._closed:
                 raise RuntimeError("conference controller is closed")
@@ -128,6 +136,13 @@ class InteractiveConference:
             self._started_at = utc_now_rfc3339()
             self._finished_at = None
             self._error = None
+            self._warning = None
+            self._objective = safe_objective
+            self._stage = "Preparing participants"
+            self._current_speaker = None
+            self._participant_states = {
+                item.participant_id: "waiting" for item in self._participants
+            }
             future = asyncio.run_coroutine_threadsafe(
                 self._run(conference_id, objective), self._loop
             )
@@ -153,11 +168,17 @@ class InteractiveConference:
                     "conference_id": str(self._conference_id) if self._conference_id else None,
                     "status": self._status,
                     "provider": self._provider_name,
+                    "mode": "interactive",
+                    "objective": self._objective,
+                    "stage": self._stage,
+                    "current_speaker": self._current_speaker,
+                    "warning": self._warning,
                     "participants": [
                         {
                             "participant_id": item.participant_id,
                             "display_name": item.display_name,
                             "responsibility": item.responsibility,
+                            "state": self._participant_states[item.participant_id],
                         }
                         for item in self._participants
                     ],
@@ -214,6 +235,9 @@ class InteractiveConference:
             if self._status in {"cancelling", "cancelled"}:
                 return
             self._status = "running"
+            self._stage = "Researcher and Builder are working"
+            self._participant_states["Researcher"] = "working"
+            self._participant_states["Builder"] = "working"
             self._condition.notify_all()
         config = RuntimeConfig(
             task_timeout=self._task_timeout,
@@ -243,12 +267,28 @@ class InteractiveConference:
                         ),
                     }
                 )
-                research = _public_output(first.results["Researcher"])
-                proposal = _public_output(first.results["Builder"])
+                research = _optional_public_output(first.results["Researcher"])
+                proposal = _optional_public_output(first.results["Builder"])
+                research_event = _public_message_event(first, "Researcher")
+                proposal_event = _public_message_event(first, "Builder")
+                self._record_contribution("Researcher", research)
+                self._record_contribution("Builder", proposal)
+                if research is None and proposal is None:
+                    raise RuntimeError("initial participants did not return public messages")
                 review_context = _context(
                     objective,
-                    (("Researcher", research), ("Builder", proposal)),
+                    tuple(
+                        item
+                        for item in (("Researcher", research), ("Builder", proposal))
+                        if item[1] is not None
+                    ),
                 )
+                review_sources = tuple(
+                    event.event_id
+                    for event in (research_event, proposal_event)
+                    if event is not None
+                )
+                self._set_participant_state("Reviewer", "working", "Reviewer is checking the proposals")
                 second = await orchestrator.run(
                     {
                         "Reviewer": _assignment(
@@ -256,18 +296,33 @@ class InteractiveConference:
                             review_context,
                             "review",
                             "Researcher,Builder,conference",
+                            upstream_event_ids=review_sources,
                         )
                     }
                 )
-                review = _public_output(second.results["Reviewer"])
+                review = _optional_public_output(second.results["Reviewer"])
+                review_event = _public_message_event(second, "Reviewer")
+                self._record_contribution("Reviewer", review)
+                if review is None:
+                    self._set_warning(
+                        "Reviewer could not contribute. The Moderator continued with the available messages."
+                    )
                 synthesis_context = _context(
                     objective,
-                    (
-                        ("Researcher", research),
-                        ("Builder", proposal),
-                        ("Reviewer", review),
+                    tuple(
+                        item
+                        for item in (
+                            ("Researcher", research),
+                            ("Builder", proposal),
+                            ("Reviewer", review),
+                        )
+                        if item[1] is not None
                     ),
                 )
+                synthesis_sources = review_sources + (
+                    (review_event.event_id,) if review_event is not None else ()
+                )
+                self._set_participant_state("Moderator", "working", "Moderator is synthesizing the result")
                 final = await orchestrator.run(
                     {
                         "Moderator": _assignment(
@@ -275,17 +330,28 @@ class InteractiveConference:
                             synthesis_context,
                             "decision",
                             "conference",
+                            upstream_event_ids=synthesis_sources,
                         )
                     }
                 )
-                _public_output(final.results["Moderator"])
+                decision = _optional_public_output(final.results["Moderator"])
+                self._record_contribution("Moderator", decision)
+                if decision is None:
+                    raise RuntimeError("moderator did not return a public decision")
             self._set_state("completed", finished=True)
         except asyncio.CancelledError:
             self._set_state("cancelled", finished=True)
             raise
-        except Exception as exc:
-            safe_error, _ = redact_text(f"{type(exc).__name__}: {exc}")
-            self._set_state("failed", error=safe_error, finished=True)
+        except Exception:
+            self._set_state(
+                "failed",
+                error=(
+                    "The conference could not complete because too few public "
+                    "participant messages were returned. Retry the task or check "
+                    "the provider configuration."
+                ),
+                finished=True,
+            )
 
     def _set_state(
         self, status: str, *, error: str | None = None, finished: bool = False
@@ -295,10 +361,50 @@ class InteractiveConference:
             self._error = error
             if finished:
                 self._finished_at = utc_now_rfc3339()
+                self._current_speaker = None
+                self._stage = status.capitalize()
+                for participant_id, participant_state in tuple(
+                    self._participant_states.items()
+                ):
+                    if participant_state == "contributed":
+                        self._participant_states[participant_id] = "finished"
+            self._condition.notify_all()
+
+    def _set_participant_state(self, participant_id: str, state: str, stage: str) -> None:
+        with self._condition:
+            self._participant_states[participant_id] = state
+            self._stage = stage
+            self._current_speaker = participant_id if state == "working" else None
+            self._condition.notify_all()
+
+    def _record_contribution(self, participant_id: str, output: str | None) -> None:
+        with self._condition:
+            self._participant_states[participant_id] = (
+                "contributed" if output is not None else "failed"
+            )
+            self._current_speaker = participant_id if output is not None else None
+            self._stage = (
+                f"{participant_id} contributed"
+                if output is not None
+                else f"{participant_id} could not contribute"
+            )
+            self._condition.notify_all()
+
+    def _set_warning(self, warning: str) -> None:
+        safe_warning, _ = redact_text(warning, max_length=512)
+        with self._condition:
+            self._warning = safe_warning
             self._condition.notify_all()
 
 
-def _assignment(name: str, value: str, kind: str, recipient: str) -> TaskSpec:
+def _assignment(
+    name: str,
+    value: str,
+    kind: str,
+    recipient: str,
+    *,
+    upstream_event_ids: tuple[UUID, ...] = (),
+) -> TaskSpec:
     return TaskSpec(
         f"{name} root",
         children=(
@@ -308,18 +414,34 @@ def _assignment(name: str, value: str, kind: str, recipient: str) -> TaskSpec:
                 publish_output=True,
                 message_kind=kind,
                 recipient_id=recipient,
+                upstream_event_ids=upstream_event_ids,
             ),
         ),
     )
 
 
-def _public_output(result: TaskResult) -> str:
+def _optional_public_output(result: TaskResult) -> str | None:
     if not result.succeeded or not result.children or not result.children[0].output:
-        raise RuntimeError(f"participant {result.worker_id} did not return a public message")
+        return None
     return result.children[0].output
 
 
-def _context(objective: str, messages: tuple[tuple[str, str], ...]) -> str:
+def _public_message_event(
+    report: OrchestrationReport, participant_id: str
+) -> NormalizedEvent | None:
+    """Return the genuine public message event accepted for one participant."""
+    return next(
+        (
+            event
+            for event in report.normalized_events
+            if event.event_type == "message.sent"
+            and dict(event.attributes).get("speaker_id") == participant_id
+        ),
+        None,
+    )
+
+
+def _context(objective: str, messages: tuple[tuple[str, str | None], ...]) -> str:
     parts = [f"Objective: {objective}", "Public conference messages:"]
     parts.extend(f"{speaker}: {message}" for speaker, message in messages)
     return "\n\n".join(parts)[:16_000]

@@ -68,6 +68,20 @@ causal relationships when known.
 Monotonic clocks remain appropriate for internal deadline and duration
 measurement but are not serialized as wall-clock timestamps.
 
+For public conference messages, the direct `causation_event_id` identifies the
+accepted local task-lifecycle fact that enabled the message. Bounded upstream
+message IDs used as later-round inputs are recorded separately in provenance;
+this preserves fork/join inputs without forcing multiple direct causes into the
+single-cause envelope field. The command correlation ID groups the assignment,
+lifecycle, message, and result facts.
+
+Native producers accept causal and upstream references only when the referenced
+event was already accepted by the same orchestrator session. Public messages
+must be caused by the matching task's `task.started` event, and their upstream
+references must identify prior `message.sent` facts. Task IDs are unique across
+the complete run submission so a lifecycle or projection lookup cannot alias
+executions assigned to different workers or sibling branches.
+
 Duplicate delivery is allowed. Consumers deduplicate by `event_id`. A sequence
 gap is observable but does not authorize inventing missing events.
 

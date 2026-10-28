@@ -1,0 +1,29 @@
+<!doctype html><html lang="en"><meta charset="utf-8">
+<title>Agent Conference browser regression tests</title>
+<style>body{font:16px/1.5 system-ui;background:#f3f6fb;color:#152236;margin:24px}iframe{display:block;border:1px solid #65758b;height:800px;margin:20px 0}li{margin:8px 0}.fail{color:#9b102d}.pass{color:#09653f}button{padding:8px}.setup{max-width:760px;padding:18px;border:1px solid #b7791f;border-radius:8px;background:#fffaf0}.setup code{display:block;margin:12px 0;padding:12px;overflow-wrap:anywhere;background:#172033;color:#f7fafc}.setup[hidden]{display:none}</style>
+<h1>Agent Conference browser regression tests</h1>
+<p>Runs the production dashboard with synthetic test records and controlled speech callbacks. No model calls or real audio.</p>
+<div id="setup" class="setup" hidden>
+ <strong>This test page needs its local server.</strong>
+ <p>Opening <code>dashboard.html</code> directly cannot load the production dashboard or its test fixtures. From the repository root, run:</p>
+ <code>.\tests\run_browser_dashboard_smoke.ps1</code>
+ <p>Then open the loopback URL printed in the terminal. This is a test harness; the normal Agent Conference dashboard starts through the plugin.</p>
+</div>
+<div id="runner"><button id="rerun">Run again</button>
+<p id="status" role="status">Preparing browser checks…</p><ol id="results"></ol><div id="frames"></div></div>
+<script>
+async function run(){
+ const results=document.querySelector('#results'),frames=document.querySelector('#frames');results.replaceChildren();frames.replaceChildren();let failures=0,total=0;
+ document.querySelector('#status').textContent='Running…';
+ for(const width of [1440,768,360]){
+  const frame=document.createElement('iframe');frame.title=`Dashboard under test at ${width}px`;frame.style.width=width+'px';
+  const ready=new Promise((resolve,reject)=>{const timer=setTimeout(()=>reject(new Error('Dashboard frame timed out')),5000);frame.onload=()=>{clearTimeout(timer);resolve()};frame.onerror=()=>{clearTimeout(timer);reject(new Error('Dashboard frame failed to load'))}});frame.src='/dashboard?token=test-fixture';frames.append(frame);
+  try{await ready;if(typeof frame.contentWindow.runDashboardChecks!=='function')throw new Error('Test fixtures were not loaded');const checks=await frame.contentWindow.runDashboardChecks();
+  for(const check of checks){total++;const li=document.createElement('li');li.className=check.ok?'pass':'fail';li.textContent=`${width}px: ${check.ok?'PASS':'FAIL'} — ${check.name}${check.error?' — '+check.error:''}`;results.append(li);if(!check.ok)failures++}
+  }catch(error){failures++;total++;const li=document.createElement('li');li.className='fail';li.textContent=`${width}px: FAIL — ${error.message}. Start this page through tests/run_browser_dashboard_smoke.ps1.`;results.append(li)}
+ }
+ document.querySelector('#status').textContent=`${total-failures}/${total} checks passed; ${failures} failures.`;document.title=failures?'FAIL: dashboard regressions':'PASS: dashboard regressions';
+}
+document.querySelector('#rerun').onclick=run;
+if(location.protocol==='file:'){document.querySelector('#setup').hidden=false;document.querySelector('#runner').hidden=true;document.title='Start the Agent Conference browser test server'}else run();
+</script></html>

@@ -104,6 +104,10 @@ class Orchestrator:
         self._current_run_id: UUID | None = None
         self._event_sequence = 0
         self._normalized_by_run: dict[UUID, list[NormalizedEvent]] = {}
+        self._known_events: dict[UUID, NormalizedEvent] = {}
+        self._lifecycle_event_ids: dict[
+            tuple[UUID, UUID, UUID, tuple[str, ...]], UUID
+        ] = {}
         self._event_bus = event_bus
         self._runtime_factory = runtime_factory
 
@@ -182,6 +186,11 @@ class Orchestrator:
             )
             raise
         finally:
+            self._lifecycle_event_ids = {
+                key: value
+                for key, value in self._lifecycle_event_ids.items()
+                if key[0] != run_id
+            }
             self._current_run_id = None
             self._run_active = False
             self._run_idle.set()
@@ -196,6 +205,9 @@ class Orchestrator:
         loop = asyncio.get_running_loop()
         execution_deadline = monotonic() + self._config.task_timeout
         futures: list[asyncio.Future[WorkerEnvelope]] = []
+        self._validate_unique_task_ids(assignments)
+        for task in assignments.values():
+            self._validate_upstream_evidence(task)
         for worker_id, task in assignments.items():
             if worker_id in self._failed_workers:
                 raise WorkerUnavailableError(
@@ -294,7 +306,22 @@ class Orchestrator:
                     "critical": EventImportance.CRITICAL,
                 }.get(observation.importance, EventImportance.ROUTINE)
                 try:
-                    self._record_normalized(
+                    lifecycle_key = (
+                        envelope.run_id or request.run_id,
+                        envelope.correlation_id,
+                        observation.task_id,
+                        observation.agent_path,
+                    ) if observation.task_id is not None else None
+                    direct_cause = (
+                        self._lifecycle_event_ids.get(lifecycle_key)
+                        if lifecycle_key is not None
+                        else None
+                    )
+                    if observation.event_type == "message.sent" and direct_cause is None:
+                        raise ValueError(
+                            "public message lacks a matching accepted task lifecycle"
+                        )
+                    event = self._record_normalized(
                         observation.event_type,
                         observation.summary,
                         run_id=envelope.run_id or self._current_run_id,
@@ -305,9 +332,13 @@ class Orchestrator:
                         agent_path=observation.agent_path,
                         status=observation.status,
                         attributes=observation.attributes,
+                        upstream_event_ids=observation.upstream_event_ids,
+                        causation_event_id=direct_cause,
                         origin=EventOrigin.WORKER,
                         importance=importance,
                     )
+                    if observation.event_type == "task.started" and lifecycle_key:
+                        self._lifecycle_event_ids[lifecycle_key] = event.event_id
                 except (TypeError, ValueError):
                     LOGGER.warning("Suppressing invalid worker observation")
                 continue
@@ -463,9 +494,20 @@ class Orchestrator:
         agent_path: tuple[str, ...] = (),
         status: str | None = None,
         attributes: tuple[tuple[str, object], ...] = (),
+        upstream_event_ids: tuple[UUID, ...] = (),
+        causation_event_id: UUID | None = None,
         origin: EventOrigin = EventOrigin.ORCHESTRATOR,
         importance: EventImportance = EventImportance.ROUTINE,
     ) -> NormalizedEvent:
+        self._validate_event_references(
+            event_type,
+            causation_event_id=causation_event_id,
+            upstream_event_ids=upstream_event_ids,
+            correlation_id=correlation_id,
+            task_id=task_id,
+            agent_path=agent_path,
+            worker_id=worker_id,
+        )
         safe_summary, redactions = redact_text(summary[:4096])
         safe_worker_id = (
             redact_text(worker_id[:256])[0] if worker_id is not None else None
@@ -487,6 +529,13 @@ class Orchestrator:
         if field_redacted and not redactions:
             redactions = (("redacted", True), ("redaction_rule", "structured-field"))
         self._event_sequence += 1
+        provenance: tuple[tuple[str, object], ...] = (
+            ("source", "ctmao-native-runtime"),
+        )
+        if upstream_event_ids:
+            provenance += (
+                ("source_event_ids", ",".join(str(item) for item in upstream_event_ids)),
+            )
         event = NormalizedEvent(
             event_type=event_type,
             session_id=self._session_id,
@@ -500,17 +549,82 @@ class Orchestrator:
             correlation_id=correlation_id,
             task_id=task_id,
             parent_task_id=parent_task_id,
+            causation_event_id=causation_event_id,
             agent_path=safe_agent_path,
             status=safe_status,
             attributes=safe_attributes,  # type: ignore[arg-type]
-            provenance=(("source", "ctmao-native-runtime"),),
+            provenance=provenance,
             redactions=redactions,
         )
         if run_id is not None:
             self._normalized_by_run.setdefault(run_id, []).append(event)
+        self._known_events[event.event_id] = event
         if self._event_bus is not None:
             self._event_bus.publish(event)
         return event
+
+    def _validate_upstream_evidence(self, task: TaskSpec) -> None:
+        """Reject native provenance links that are not accepted session events."""
+        unknown = set(task.upstream_event_ids).difference(self._known_events)
+        if unknown:
+            raise ValueError("task cites unknown upstream event evidence")
+        if any(
+            self._known_events[event_id].event_type != "message.sent"
+            for event_id in task.upstream_event_ids
+        ):
+            raise ValueError("task upstream evidence must cite public messages")
+        for child in task.children:
+            self._validate_upstream_evidence(child)
+
+    def _validate_unique_task_ids(self, assignments: Mapping[str, TaskSpec]) -> None:
+        """Reject ambiguous task identities across a complete run submission."""
+        seen: set[UUID] = set()
+
+        def visit(node: TaskSpec) -> None:
+            if node.task_id in seen:
+                raise ValueError("task IDs must be unique across run assignments")
+            seen.add(node.task_id)
+            for child in node.children:
+                visit(child)
+
+        for task in assignments.values():
+            visit(task)
+
+    def _validate_event_references(
+        self,
+        event_type: str,
+        *,
+        causation_event_id: UUID | None,
+        upstream_event_ids: tuple[UUID, ...],
+        correlation_id: UUID | None,
+        task_id: UUID | None,
+        agent_path: tuple[str, ...],
+        worker_id: str | None,
+    ) -> None:
+        """Validate causal links against events already accepted in this session."""
+        referenced = upstream_event_ids + (
+            (causation_event_id,) if causation_event_id is not None else ()
+        )
+        if any(event_id not in self._known_events for event_id in referenced):
+            raise ValueError("event cites unknown or non-prior session evidence")
+        if event_type != "message.sent":
+            return
+        if causation_event_id is None:
+            raise ValueError("public messages require a direct lifecycle cause")
+        cause = self._known_events[causation_event_id]
+        if (
+            cause.event_type != "task.started"
+            or cause.worker_id != worker_id
+            or cause.correlation_id != correlation_id
+            or cause.task_id != task_id
+            or cause.agent_path != agent_path
+        ):
+            raise ValueError("public message cause does not match its task lifecycle")
+        if any(
+            self._known_events[event_id].event_type != "message.sent"
+            for event_id in upstream_event_ids
+        ):
+            raise ValueError("public message upstream evidence must cite messages")
 
     async def close(self) -> None:
         """Cooperatively stop workers; calling close repeatedly is safe."""

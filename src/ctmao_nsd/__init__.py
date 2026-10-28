@@ -46,6 +46,10 @@ from .interactive_conference import (
     Participant,
 )
 from .openai_provider import OpenAIProviderError, OpenAIResponsesProvider
+from .codex_conference_bridge import (
+    CODEX_BRIDGE_PROTOCOL_VERSION,
+    CodexConferenceBridge,
+)
 
 __all__ = [
     "OrchestrationReport",
@@ -62,6 +66,8 @@ __all__ = [
     "ConferenceTurn",
     "CodexThreadSnapshotAdapter",
     "CodexExecJsonlAdapter",
+    "CodexConferenceBridge",
+    "CODEX_BRIDGE_PROTOCOL_VERSION",
     "EventBus",
     "EventProjection",
     "ExternalRuntimeAdapter",
@@ -91,4 +97,4 @@ __all__ = [
     "project_message_turns",
 ]
 
-__version__ = "0.3.0"
+__version__ = "0.4.2"
